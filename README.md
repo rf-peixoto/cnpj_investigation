@@ -8,10 +8,6 @@ risk with a transparent, per-signal **evidence trail**. It plots companies on a
 map, finds connection paths between any two CNPJs, and lets you search the whole
 pool across campaigns.
 
-Visual style: terminal / TUI — white-on-black, colour only on signal. Runs fully
-offline (all JS/CSS/fonts are vendored locally; only the company API, the map
-tiles and the geocoder reach the network).
-
 ---
 
 ## Quick start
