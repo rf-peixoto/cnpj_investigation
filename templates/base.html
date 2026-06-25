@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}CNPJ // correlation platform{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand"><span class="prompt">▌</span> cnpj<b>scope</b></div>
+    <nav class="nav">
+      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint=='index' }}">campaigns</a>
+      <a href="{{ url_for('search') }}" class="{{ 'active' if request.endpoint=='search' }}">global search</a>
+      <a href="{{ url_for('partners') }}" class="{{ 'active' if request.endpoint=='partners' }}">serial partners</a>
+    </nav>
+    <div class="spacer"></div>
+    <span class="faint mono-sm">fraud correlation toolkit</span>
+  </div>
+  <main class="wrap {% block wrapclass %}{% endblock %}">
+    {% block body %}{% endblock %}
+  </main>
+  <div id="toast" class="toast"></div>
+  <script>
+    function toast(msg, isErr) {
+      const t = document.getElementById('toast');
+      t.textContent = msg; t.className = 'toast show' + (isErr ? ' err' : '');
+      clearTimeout(window.__tt); window.__tt = setTimeout(() => t.className = 'toast', 3200);
+    }
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

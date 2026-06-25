@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}{{ row.razao_social or row.cnpj }} // cnpjscope{% endblock %}
+{% block wrapclass %}narrow{% endblock %}
+{% block body %}
+<div class="crumb mono-sm" style="margin-bottom:10px">
+  <a href="{{ url_for('index') }}">campaigns</a> /
+  <a href="{{ url_for('search') }}">search</a> / {{ row.cnpj }}
+</div>
+
+<div class="eyebrow">{{ row.natureza_juridica or 'company' }}</div>
+<h1 style="margin-bottom:4px">{{ row.razao_social or row.cnpj }}</h1>
+<div class="muted" style="margin-bottom:6px">
+  {% if row.nome_fantasia %}{{ row.nome_fantasia }} · {% endif %}{{ row.cnpj }}
+</div>
+<div style="margin-bottom:18px">
+  {% if row.situacao_cadastral == 'Ativa' %}
+    <span class="pill green">{{ row.situacao_cadastral }}</span>
+  {% else %}
+    <span class="pill red">{{ row.situacao_cadastral or 'unknown' }}</span>
+  {% endif %}
+  <span class="pill">{{ row.matriz_filial }}</span>
+  <span class="pill">{{ row.porte_empresa }}</span>
+  {% if row.opcao_mei == 'S' %}<span class="pill cyan">MEI</span>{% endif %}
+  {% if row.opcao_simples == 'S' %}<span class="pill cyan">Simples</span>{% endif %}
+</div>
+
+{% if campaigns %}
+<div class="panel"><div class="bd faint mono-sm">in campaigns:
+  {% for c in campaigns %}<a href="{{ url_for('campaign', campaign_id=c.id) }}">{{ c.name }}</a>{% if not loop.last %} · {% endif %}{% endfor %}
+</div></div>
+{% endif %}
+
+<div class="panel"><div class="hd"><h2>Investigator review</h2>
+  {% set st = row.review_status or 'none' %}
+  <span class="count">
+    {% if st == 'confirmed' %}<span class="pill red">confirmed fraud</span>
+    {% elif st == 'suspicious' %}<span class="pill red">suspicious</span>
+    {% elif st == 'cleared' %}<span class="pill green">cleared</span>
+    {% else %}<span class="pill">unreviewed</span>{% endif %}
+  </span></div>
+  <div class="bd">
+    <form method="post" action="{{ url_for('cnpj_review', cnpj=row.cnpj) }}">
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:0 0 200px">
+          <label for="review_status">status</label>
+          <select id="review_status" name="review_status">
+            {% for opt in ['none','suspicious','cleared','confirmed'] %}
+            <option value="{{ opt }}" {{ 'selected' if st == opt }}>{{ opt }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div style="flex:1">
+          <label for="review_note">note</label>
+          <input type="text" id="review_note" name="review_note"
+                 value="{{ row.review_note or '' }}" placeholder="investigation note…">
+        </div>
+        <button class="btn-primary btn-sm" type="submit">save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="grid cols-2">
+  <div class="panel"><div class="hd"><h2>Registry</h2></div><div class="bd">
+    <dl class="kv">
+      <dt>opened</dt><dd>{{ row.data_inicio_atividade }}</dd>
+      <dt>status since</dt><dd>{{ row.data_situacao }}</dd>
+      <dt>capital</dt><dd>{{ row.capital_social | brl }}</dd>
+      <dt>main CNAE</dt><dd>{{ row.cnae_principal }} — {{ row.cnae_principal_desc }}</dd>
+      <dt>nature</dt><dd>{{ row.natureza_juridica }}</dd>
+    </dl>
+  </div></div>
+
+  <div class="panel"><div class="hd"><h2>Location &amp; contact</h2></div><div class="bd">
+    <dl class="kv">
+      <dt>address</dt><dd>{{ row.tipo_logradouro }} {{ row.logradouro }}, {{ row.numero }}
+        {% if row.complemento %}({{ row.complemento }}){% endif %}</dd>
+      <dt>district</dt><dd>{{ row.bairro }}</dd>
+      <dt>city / uf</dt><dd>{{ row.municipio }} / {{ row.uf }}</dd>
+      <dt>cep</dt><dd>{{ row.cep }}</dd>
+      <dt>e-mail</dt><dd>{% if row.email %}<a href="{{ url_for('search', email=row.email) }}">{{ row.email }}</a>{% else %}—{% endif %}</dd>
+      <dt>phones</dt><dd>
+        {% for t in raw.telefones %}({{ t.ddd }}) {{ t.numero }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}
+      </dd>
+    </dl>
+  </div></div>
+</div>
+
+<div class="panel"><div class="hd"><h2>Partners (QSA)</h2>
+  <span class="count">{{ raw.QSA | length }}</span></div>
+  <div class="bd flush">
+    {% if raw.QSA %}
+    <table><thead><tr><th>name</th><th>cpf/cnpj</th><th>role</th><th>since</th><th>age band</th></tr></thead>
+    <tbody>
+      {% for p in raw.QSA %}
+      <tr>
+        <td><a href="{{ url_for('search', socio=p.nome_socio) }}">{{ p.nome_socio }}</a></td>
+        <td class="mono-sm">{{ p.cnpj_cpf_socio }}</td>
+        <td>{{ p.qualificacao_socio }}</td>
+        <td class="mono-sm">{{ p.data_entrada_sociedade }}</td>
+        <td class="faint">{{ p.faixa_etaria }}</td>
+      </tr>
+      {% endfor %}
+    </tbody></table>
+    {% else %}<div class="empty">No partners listed.</div>{% endif %}
+  </div>
+</div>
+
+<div class="panel"><div class="hd"><h2>All CNAE codes</h2></div><div class="bd">
+  {% for c in raw.cnaes %}
+    <span class="pill {{ 'green' if c.is_principal }}">{{ c.codigo }} · {{ c.descricao }}</span>
+  {% else %}<span class="faint">—</span>{% endfor %}
+</div></div>
+
+<p class="faint mono-sm" style="margin-top:14px">
+  <a href="https://api.opencnpj.org/{{ row.cnpj }}" target="_blank">raw API record →</a>
+  · last fetched {{ row.fetched_at or 'never' }}
+</p>
+{% endblock %}

@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}{{ campaign.name }} // cnpjscope{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+{% endblock %}
+
+{% block body %}
+<div class="crumb mono-sm" style="margin-bottom:10px">
+  <a href="{{ url_for('index') }}">campaigns</a> / {{ campaign.name }}
+</div>
+
+<div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:18px">
+  <div style="flex:1;min-width:240px">
+    <div class="eyebrow">campaign</div>
+    <h1>{{ campaign.name }}</h1>
+    {% if campaign.description %}<div class="muted">{{ campaign.description }}</div>{% endif %}
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn-sm" id="btn-refresh" title="Re-fetch every CNPJ from the API">↻ refresh data</button>
+    <button class="btn-sm" id="btn-geocode" title="Resolve addresses to map coordinates">⌖ geocode for map</button>
+    <a class="btn btn-sm" href="{{ url_for('export_campaign', campaign_id=campaign.id) }}"
+       title="Download companies, risk scores and flags as CSV">⤓ export csv</a>
+    <form method="post" action="{{ url_for('delete_campaign', campaign_id=campaign.id) }}"
+          onsubmit="return confirm('Delete this campaign? CNPJ records stay in the global pool.')">
+      <button class="btn-sm btn-danger" type="submit">delete</button>
+    </form>
+  </div>
+</div>
+
+<!-- add CNPJs -->
+<div class="panel">
+  <div class="hd"><h2>Add CNPJs</h2>
+    <span class="count" id="progress-label">—</span></div>
+  <div class="bd">
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:2">
+        <label for="cnpjs">paste CNPJs — any format, any separator</label>
+        <textarea id="cnpjs" rows="3"
+          placeholder="35.478.926/0001-71, 11222333000181&#10;19131243000197"></textarea>
+      </div>
+      <div style="flex:1">
+        <label for="file">or upload .txt</label>
+        <input type="file" id="file" accept=".txt,.csv,text/plain"
+               style="padding:7px 0;border:none">
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn-primary btn-sm" id="btn-add">+ add &amp; fetch</button>
+          <span class="faint mono-sm" id="add-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- summary tiles -->
+<div class="stats" id="summary" style="margin-bottom:18px">
+  <div class="stat"><div class="n" data-s="total">0</div><div class="l">companies</div></div>
+  <div class="stat warn"><div class="n" data-s="recent">0</div><div class="l">&lt; 1 yr</div></div>
+  <div class="stat bad"><div class="n" data-s="high_risk">0</div><div class="l">high risk</div></div>
+  <div class="stat violet"><div class="n" data-s="rings">0</div><div class="l">rings</div></div>
+  <div class="stat violet"><div class="n" data-s="shared_partner_groups">0</div><div class="l">owner links</div></div>
+  <div class="stat"><div class="n" data-s="shared_address_groups">0</div><div class="l">address links</div></div>
+  <div class="stat"><div class="n" data-s="shared_contact_groups">0</div><div class="l">contact links</div></div>
+  <div class="stat ok"><div class="n" data-s="mapped">0</div><div class="l">geocoded</div></div>
+</div>
+
+<div class="tabs" id="tabs">
+  <button class="tab active" data-tab="graph">correlation map</button>
+  <button class="tab" data-tab="geo">geographic map</button>
+  <button class="tab" data-tab="companies">companies</button>
+  <button class="tab" data-tab="rings">rings</button>
+  <button class="tab" data-tab="clusters">shared attributes</button>
+  <button class="tab" data-tab="insights">insights</button>
+</div>
+
+<!-- correlation graph -->
+<section class="tabpane active" data-pane="graph">
+  <div class="panel">
+    <div class="hd"><h2>Correlation network</h2>
+      <span class="count">companies linked by shared owner / address / contact / capital</span></div>
+    <div class="bd flush">
+      <div id="graph"></div>
+      <div class="legend">
+        <span><span class="dot dim"></span>company</span>
+        <span><span class="dot violet" style="background:var(--violet)"></span>partner / owner</span>
+        <span><span class="dot" style="background:var(--cyan)"></span>address</span>
+        <span><span class="dot" style="background:var(--amber)"></span>e-mail</span>
+        <span><span class="dot" style="background:var(--accent)"></span>phone</span>
+        <span><span class="dot" style="background:#888"></span>capital</span>
+        <span class="faint">— node ring colour = risk —</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- geographic map -->
+<section class="tabpane" data-pane="geo">
+  <div class="panel">
+    <div class="hd"><h2>Geographic distribution</h2>
+      <span class="count" id="geo-note">red = recent / high risk · run "geocode for map" to populate</span></div>
+    <div class="bd flush"><div id="map"></div></div>
+  </div>
+</section>
+
+<!-- companies table -->
+<section class="tabpane" data-pane="companies">
+  <div class="panel">
+    <div class="hd"><h2>Companies</h2>
+      <input type="search" id="filter-companies" placeholder="filter table…"
+             style="max-width:240px;margin-left:auto"></div>
+    <div class="bd flush scroll">
+      <table id="companies-table">
+        <thead><tr>
+          <th>risk</th><th>razão social</th><th>cnpj</th><th>uf</th>
+          <th>opened</th><th>capital</th><th>flags</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div id="problems"></div>
+</section>
+
+<!-- rings -->
+<section class="tabpane" data-pane="rings">
+  <div class="panel">
+    <div class="hd"><h2>Suspected rings</h2>
+      <span class="count">groups of companies tied together by one or more shared signals</span></div>
+    <div class="bd" id="rings"></div>
+  </div>
+</section>
+
+<!-- clusters -->
+<section class="tabpane" data-pane="clusters">
+  <div class="grid cols-2" id="clusters"></div>
+</section>
+
+<!-- insights -->
+<section class="tabpane" data-pane="insights">
+  <div class="grid cols-2" id="insights"></div>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.CAMPAIGN_ID = {{ campaign.id }};
+</script>
+<script src="{{ url_for('static', filename='campaign.js') }}"></script>
+{% endblock %}

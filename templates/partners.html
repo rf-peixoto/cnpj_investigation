@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}serial partners // cnpjscope{% endblock %}
+{% block body %}
+<div class="eyebrow">platform-wide</div>
+<h1 style="margin-bottom:4px">Serial partners</h1>
+<div class="muted" style="margin-bottom:16px">
+  Owners attached to several companies across every campaign — the classic
+  front-man (<i>laranja</i>) pattern. Counts use all CNPJs successfully fetched.
+</div>
+
+<form method="get" class="row" style="align-items:flex-end;margin-bottom:16px">
+  <div style="flex:0 0 220px">
+    <label for="min">minimum companies</label>
+    <select id="min" name="min" onchange="this.form.submit()">
+      {% for v in [2,3,4,5,8] %}
+      <option value="{{ v }}" {{ 'selected' if min_companies == v }}>{{ v }}+</option>
+      {% endfor %}
+    </select>
+  </div>
+  <noscript><button class="btn-sm" type="submit">apply</button></noscript>
+</form>
+
+<div class="panel">
+  <div class="hd"><h2>Owners by company count</h2>
+    <span class="count">{{ partners | length }} partner(s)</span></div>
+  <div class="bd flush scroll">
+    {% if partners %}
+    <table>
+      <thead><tr><th>partner</th><th>cpf/cnpj</th><th>companies</th><th>cnpjs</th></tr></thead>
+      <tbody>
+        {% for p in partners %}
+        <tr>
+          <td><a href="{{ url_for('search', socio=p.name) }}">{{ p.name }}</a></td>
+          <td class="mono-sm faint">{{ p.mask or '—' }}</td>
+          <td><span class="pill {{ 'red' if p.count >= 5 else 'amber' if p.count >= 3 else 'violet' }}">{{ p.count }}</span></td>
+          <td class="mono-sm">
+            {% for c in p.cnpjs[:12] %}<a class="pill" href="{{ url_for('cnpj_detail', cnpj=c) }}" target="_blank">{{ c }}</a>{% endfor %}
+            {% if p.cnpjs | length > 12 %}<span class="faint">+{{ p.cnpjs | length - 12 }} more</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty" style="padding:22px">No partner owns {{ min_companies }}+ companies in the pool yet. Fetch more CNPJs, or lower the threshold.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

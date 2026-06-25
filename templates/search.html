@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}global search // cnpjscope{% endblock %}
+{% block body %}
+
+<div class="eyebrow">global pool</div>
+<h1 style="margin-bottom:14px">Search every fetched CNPJ</h1>
+
+<div class="panel">
+  <div class="bd">
+    <form method="get" action="{{ url_for('search') }}">
+      <div class="field">
+        <label for="q">free text — name / fantasia / cnpj / e-mail / partner</label>
+        <input type="search" id="q" name="q" value="{{ filters.q }}" placeholder="e.g. manuel  ·  35478926000171  ·  luiz filipe" autofocus>
+      </div>
+      <div class="row">
+        <div><label>partner name</label><input type="text" name="socio" value="{{ filters.socio }}"></div>
+        <div><label>e-mail</label><input type="text" name="email" value="{{ filters.email }}"></div>
+        <div><label>CNAE</label><input type="text" name="cnae" value="{{ filters.cnae }}"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div><label>city</label><input type="text" name="municipio" value="{{ filters.municipio }}"></div>
+        <div><label>district</label><input type="text" name="bairro" value="{{ filters.bairro }}"></div>
+        <div><label>UF</label>
+          <select name="uf"><option value="">any</option>
+            {% for u in ufs %}<option value="{{ u }}" {{ 'selected' if filters.uf==u }}>{{ u }}</option>{% endfor %}
+          </select></div>
+        <div><label>status</label>
+          <select name="situacao"><option value="">any</option>
+            {% for s in situacoes %}<option value="{{ s }}" {{ 'selected' if filters.situacao==s }}>{{ s }}</option>{% endfor %}
+          </select></div>
+      </div>
+      <div style="margin-top:14px;display:flex;align-items:center;gap:18px;flex-wrap:wrap">
+        <label class="checkbox"><input type="checkbox" name="recent_only" {{ 'checked' if filters.recent_only }}>
+          only companies &lt; 1 year old</label>
+        <button class="btn-primary" type="submit">search</button>
+        <a class="btn btn-ghost" href="{{ url_for('search') }}">clear</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% if has_query %}
+<div class="panel">
+  <div class="hd"><h2>Results</h2><span class="count">{{ results|length }}{% if results|length == 500 %}+ (capped){% endif %}</span></div>
+  <div class="bd flush scroll">
+    {% if results %}
+    <table>
+      <thead><tr><th>razão social</th><th>cnpj</th><th>uf / city</th><th>status</th><th>opened</th><th>partners</th></tr></thead>
+      <tbody>
+        {% for r in results %}
+        <tr>
+          <td><a href="{{ url_for('cnpj_detail', cnpj=r.cnpj) }}">{{ r.razao_social or r.cnpj }}</a>
+            {% if r.nome_fantasia %}<div class="faint mono-sm">{{ r.nome_fantasia }}</div>{% endif %}</td>
+          <td class="mono-sm">{{ r.cnpj }}</td>
+          <td>{{ r.uf }} <span class="faint">{{ r.municipio }}</span></td>
+          <td>{% if r.situacao_cadastral == 'Ativa' %}<span class="pill green">Ativa</span>
+              {% else %}<span class="pill red">{{ r.situacao_cadastral }}</span>{% endif %}</td>
+          <td class="mono-sm">{{ r.data_inicio_atividade }}</td>
+          <td class="faint mono-sm">{{ (r.socios or '')[:70] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No matches in the fetched pool. Add CNPJs to a campaign first.</div>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<div class="empty">Enter a query above to search across all campaigns.</div>
+{% endif %}
+{% endblock %}

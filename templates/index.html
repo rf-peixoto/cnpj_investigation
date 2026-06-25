@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="stats" style="margin-bottom:22px">
+  <div class="stat"><div class="n">{{ stats.campaigns }}</div><div class="l">campaigns</div></div>
+  <div class="stat ok"><div class="n">{{ stats.cnpjs_ok }}</div><div class="l">cnpjs fetched</div></div>
+  <div class="stat"><div class="n">{{ stats.cnpjs_total }}</div><div class="l">in pool</div></div>
+  <div class="stat warn"><div class="n">{{ stats.cnpjs_pending }}</div><div class="l">pending</div></div>
+  <div class="stat warn"><div class="n">{{ stats.recent }}</div><div class="l">&lt; 1 yr old</div></div>
+  <div class="stat bad"><div class="n">{{ stats.cnpjs_errors }}</div><div class="l">errors / 404</div></div>
+</div>
+
+<div class="grid cols-2">
+  <div class="panel">
+    <div class="hd"><h2>Campaigns</h2><span class="count">{{ campaigns|length }}</span></div>
+    <div class="bd flush">
+      {% if campaigns %}
+      <table>
+        <thead><tr><th>name</th><th>cnpjs</th><th>created</th><th></th></tr></thead>
+        <tbody>
+          {% for c in campaigns %}
+          <tr>
+            <td><a href="{{ url_for('campaign', campaign_id=c.id) }}">{{ c.name }}</a>
+              {% if c.description %}<div class="faint mono-sm">{{ c.description }}</div>{% endif %}
+            </td>
+            <td class="num">{{ c.cnpj_count }}</td>
+            <td class="muted">{{ c.created_at[:10] }}</td>
+            <td><a class="btn btn-sm" href="{{ url_for('campaign', campaign_id=c.id) }}">open →</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No campaigns yet. Create one to start mapping correlations.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="panel" style="align-self:start">
+    <div class="hd"><h2>New campaign</h2></div>
+    <div class="bd">
+      <form method="post" action="{{ url_for('create_campaign') }}">
+        <div class="field">
+          <label for="name">name</label>
+          <input type="text" id="name" name="name" placeholder="e.g. suspected-shell-cluster-2026" required autofocus>
+        </div>
+        <div class="field">
+          <label for="description">description (optional)</label>
+          <input type="text" id="description" name="description" placeholder="short note about this investigation">
+        </div>
+        <button class="btn-primary" type="submit">create campaign</button>
+      </form>
+      <p class="faint mono-sm" style="margin-top:16px;line-height:1.7">
+        A campaign is a working set of CNPJs. Inside it you add companies
+        (one by one or by pasting / uploading a list), the platform pulls each
+        record from opencnpj, then surfaces shared owners, addresses, contacts
+        and timing — plus a risk score per company.
+      </p>
+    </div>
+  </div>
+</div>
+{% endblock %}
