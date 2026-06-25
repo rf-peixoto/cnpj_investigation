@@ -2,9 +2,9 @@
 {% block title %}{{ campaign.name }} // cnpjscope{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet.css') }}">
+<script src="{{ url_for('static', filename='vendor/leaflet.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/vis-network.min.js') }}"></script>
 {% endblock %}
 
 {% block body %}
@@ -22,9 +22,12 @@
     <button class="btn-sm" id="btn-refresh" title="Re-fetch every CNPJ from the API">↻ refresh data</button>
     <button class="btn-sm" id="btn-geocode" title="Resolve addresses to map coordinates">⌖ geocode for map</button>
     <a class="btn btn-sm" href="{{ url_for('export_campaign', campaign_id=campaign.id) }}"
-       title="Download companies, risk scores and flags as CSV">⤓ export csv</a>
+       title="Download companies, risk scores and flags as CSV">⤓ csv</a>
+    <a class="btn btn-sm" href="{{ url_for('export_campaign_json', campaign_id=campaign.id) }}"
+       title="Portable JSON export (re-importable)">⤓ json</a>
     <form method="post" action="{{ url_for('delete_campaign', campaign_id=campaign.id) }}"
           onsubmit="return confirm('Delete this campaign? CNPJ records stay in the global pool.')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button class="btn-sm btn-danger" type="submit">delete</button>
     </form>
   </div>
@@ -37,12 +40,12 @@
   <div class="bd">
     <div class="row" style="align-items:flex-start">
       <div style="flex:2">
-        <label for="cnpjs">paste CNPJs — any format, any separator</label>
+        <label for="cnpjs">paste CNPJs — legacy or 2026 alphanumeric, any separator</label>
         <textarea id="cnpjs" rows="3"
-          placeholder="35.478.926/0001-71, 11222333000181&#10;19131243000197"></textarea>
+          placeholder="35.478.926/0001-71, 11222333000181&#10;12.ABC.345/01DE-35"></textarea>
       </div>
       <div style="flex:1">
-        <label for="file">or upload .txt</label>
+        <label for="file">or upload .txt / .csv</label>
         <input type="file" id="file" accept=".txt,.csv,text/plain"
                style="padding:7px 0;border:none">
         <div style="margin-top:10px;display:flex;gap:8px">
@@ -50,6 +53,9 @@
           <span class="faint mono-sm" id="add-status"></span>
         </div>
       </div>
+    </div>
+    <div class="faint mono-sm" style="margin-top:8px">
+      invalid check-digits are rejected before they reach the fetch queue.
     </div>
   </div>
 </div>
@@ -73,24 +79,41 @@
   <button class="tab" data-tab="rings">rings</button>
   <button class="tab" data-tab="clusters">shared attributes</button>
   <button class="tab" data-tab="insights">insights</button>
+  <button class="tab" data-tab="ops">queue &amp; data</button>
 </div>
 
 <!-- correlation graph -->
 <section class="tabpane active" data-pane="graph">
   <div class="panel">
     <div class="hd"><h2>Correlation network</h2>
-      <span class="count">companies linked by shared owner / address / contact / capital</span></div>
-    <div class="bd flush">
-      <div id="graph"></div>
-      <div class="legend">
-        <span><span class="dot dim"></span>company</span>
-        <span><span class="dot violet" style="background:var(--violet)"></span>partner / owner</span>
-        <span><span class="dot" style="background:var(--cyan)"></span>address</span>
-        <span><span class="dot" style="background:var(--amber)"></span>e-mail</span>
-        <span><span class="dot" style="background:var(--accent)"></span>phone</span>
-        <span><span class="dot" style="background:#888"></span>capital</span>
-        <span class="faint">— node ring colour = risk —</span>
+      <span class="count">edges are labelled with the exact reason two records link</span></div>
+    <div class="bd">
+      <!-- graph controls -->
+      <div class="graph-controls">
+        <div class="gc-row">
+          <span class="gc-label">signals</span>
+          <span id="dim-filters" class="dim-filters"></span>
+        </div>
+        <div class="gc-row">
+          <label class="gc-check"><input type="checkbox" id="hide-low"> hide low-signal (CEP / capital / prefix / nature)</label>
+          <label class="gc-check">min cluster size
+            <input type="number" id="min-cluster" value="2" min="2" max="20" style="width:54px">
+          </label>
+          <label class="gc-check"><input type="checkbox" id="edge-labels" checked> edge labels</label>
+          <button class="btn btn-sm btn-ghost" id="graph-reset">reset view</button>
+        </div>
+        <div class="gc-row path-row">
+          <span class="gc-label">path</span>
+          <input type="text" id="path-a" placeholder="CNPJ A" class="mono-sm" style="width:160px">
+          <input type="text" id="path-b" placeholder="CNPJ B" class="mono-sm" style="width:160px">
+          <button class="btn btn-sm" id="btn-path">shortest path</button>
+          <button class="btn btn-sm" id="btn-why">why connected?</button>
+          <span class="faint mono-sm" id="path-status"></span>
+        </div>
+        <div id="path-result" class="path-result"></div>
       </div>
+      <div id="graph"></div>
+      <div class="legend" id="legend"></div>
     </div>
   </div>
 </section>
@@ -114,7 +137,7 @@
       <table id="companies-table">
         <thead><tr>
           <th>risk</th><th>razão social</th><th>cnpj</th><th>uf</th>
-          <th>opened</th><th>capital</th><th>flags</th><th></th>
+          <th>opened</th><th>capital</th><th>top evidence</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -127,7 +150,7 @@
 <section class="tabpane" data-pane="rings">
   <div class="panel">
     <div class="hd"><h2>Suspected rings</h2>
-      <span class="count">groups of companies tied together by one or more shared signals</span></div>
+      <span class="count">click a ring to isolate it on the correlation map</span></div>
     <div class="bd" id="rings"></div>
   </div>
 </section>
@@ -140,6 +163,46 @@
 <!-- insights -->
 <section class="tabpane" data-pane="insights">
   <div class="grid cols-2" id="insights"></div>
+</section>
+
+<!-- ops: queue + import/export/merge -->
+<section class="tabpane" data-pane="ops">
+  <div class="grid cols-2">
+    <div class="panel">
+      <div class="hd"><h2>Fetch queue</h2><span class="count" id="queue-count">—</span></div>
+      <div class="bd">
+        <div id="queue-bars" class="queue-bars"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="btn btn-sm" id="btn-retry-errors">↻ retry errors (this campaign)</button>
+          <button class="btn btn-sm btn-ghost" id="btn-retry-all">↻ re-fetch all (this campaign)</button>
+        </div>
+        <div id="queue-errors" style="margin-top:12px"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="hd"><h2>Import / merge</h2></div>
+      <div class="bd">
+        <label for="import-file">import campaign from CSV or JSON</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="file" id="import-file" accept=".json,.csv,.txt" style="border:none;padding:6px 0">
+          <button class="btn btn-sm btn-primary" id="btn-import">import</button>
+        </div>
+        <div class="faint mono-sm" id="import-status" style="margin-top:6px"></div>
+        <hr style="border-color:var(--line);margin:16px 0">
+        <label for="merge-dst">merge another campaign into this one</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="merge-src" style="flex:1">
+            <option value="">— pick a campaign to absorb —</option>
+            {% for c in all_campaigns %}{% if c.id != campaign.id %}
+            <option value="{{ c.id }}">{{ c.name }} ({{ c.cnpj_count }} cnpjs)</option>
+            {% endif %}{% endfor %}
+          </select>
+          <button class="btn btn-sm" id="btn-merge">merge in</button>
+        </div>
+        <div class="faint mono-sm" id="merge-status" style="margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
 </section>
 
 {% endblock %}

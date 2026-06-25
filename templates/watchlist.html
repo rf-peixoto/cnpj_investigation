@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}watchlist // cnpjscope{% endblock %}
+{% block wrapclass %}narrow{% endblock %}
+{% block body %}
+<div class="eyebrow">monitoring</div>
+<h1 style="margin-bottom:4px">Watchlist</h1>
+<div class="muted" style="margin-bottom:16px">
+  CNPJs flagged for periodic re-checking. Each refresh is snapshotted, so the
+  detail page shows exactly what changed.
+</div>
+
+<div class="panel">
+  <div class="hd"><h2>Watched CNPJs</h2>
+    <span class="count">{{ items|length }}</span>
+    <button class="btn btn-sm btn-primary" id="btn-recheck" style="margin-left:auto">↻ re-fetch all due</button>
+  </div>
+  <div class="bd flush">
+    {% if items %}
+    <table>
+      <thead><tr><th>cnpj</th><th>razão social</th><th>status</th>
+        <th>every</th><th>last checked</th><th>note</th><th></th></tr></thead>
+      <tbody>
+        {% for w in items %}
+        <tr>
+          <td class="mono-sm"><a href="{{ url_for('cnpj_detail', cnpj=w.cnpj) }}">{{ w.cnpj | cnpjfmt }}</a></td>
+          <td>{{ w.razao_social or '—' }}</td>
+          <td>
+            {% if w.due %}<span class="pill amber">due</span>{% endif %}
+            <span class="pill {{ 'green' if w.situacao_cadastral=='Ativa' else 'red' if w.situacao_cadastral }}">
+              {{ w.situacao_cadastral or w.fetch_status or 'pending' }}</span>
+          </td>
+          <td class="mono-sm">{{ w.recheck_days }}d</td>
+          <td class="faint mono-sm">{{ (w.last_checked or '—')[:19] }} · {{ w.days_since }}d ago</td>
+          <td class="faint">{{ w.note or '' }}</td>
+          <td><button class="btn btn-sm btn-ghost" data-unwatch="{{ w.cnpj }}" title="remove">✕</button></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty" style="padding:22px">Nothing on the watchlist yet. Add CNPJs from their detail page.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelector('#btn-recheck').addEventListener('click', async () => {
+    const r = await postForm('/watchlist/recheck');
+    const j = await r.json();
+    toast(`Re-queued ${j.requeued} due CNPJ(s) for fetching`);
+    setTimeout(() => location.reload(), 1200);
+  });
+  document.querySelectorAll('[data-unwatch]').forEach(b => b.addEventListener('click', async () => {
+    await postForm(`/cnpj/${b.dataset.unwatch}/watch`, { action: 'remove' });
+    b.closest('tr').remove(); toast('Removed from watchlist');
+  }));
+</script>
+{% endblock %}

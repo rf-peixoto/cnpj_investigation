@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}fetch queue // cnpjscope{% endblock %}
+{% block wrapclass %}narrow{% endblock %}
+{% block body %}
+<div class="eyebrow">operations</div>
+<h1 style="margin-bottom:4px">Fetch queue</h1>
+<div class="muted" style="margin-bottom:16px">
+  Live view of the background fetch worker across all campaigns, with retry controls.
+</div>
+
+<div class="panel">
+  <div class="hd"><h2>Queue state</h2><span class="count" id="q-total">—</span>
+    <button class="btn btn-sm" id="btn-retry-errors" style="margin-left:auto">↻ retry errors</button>
+    <button class="btn btn-sm btn-ghost" id="btn-retry-all">↻ re-fetch everything</button>
+  </div>
+  <div class="bd"><div id="q-bars" class="queue-bars"></div></div>
+</div>
+
+<div class="panel">
+  <div class="hd"><h2>Fetch errors</h2><span class="count" id="q-errcount">—</span></div>
+  <div class="bd flush scroll" style="max-height:60vh">
+    <table id="q-errors"><thead><tr><th>cnpj</th><th>status</th><th>detail</th><th>when</th><th></th></tr></thead>
+      <tbody></tbody></table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  async function refresh() {
+    const j = await (await fetch('/queue/status')).json();
+    const s = j.status || {};
+    const total = Object.values(s).reduce((a, b) => a + b, 0);
+    document.querySelector('#q-total').textContent = `${total} CNPJs`;
+    const order = [['ok', '#3ddc84'], ['pending', '#e8b84b'], ['fetching', '#4fc3dc'],
+                   ['error', '#ff5d57'], ['not_found', '#888']];
+    document.querySelector('#q-bars').innerHTML = order.filter(([k]) => s[k]).map(([k, c]) =>
+      `<div class="bar-row"><div><div class="mono-sm">${k}</div>
+        <div class="track"><i style="width:${total ? (s[k] / total * 100).toFixed(0) : 0}%;background:${c}"></i></div></div>
+        <div class="num mono-sm">${s[k]}</div></div>`).join('') || '<div class="faint">queue empty</div>';
+    const errs = j.errors || [];
+    document.querySelector('#q-errcount').textContent = errs.length;
+    document.querySelector('#q-errors tbody').innerHTML = errs.length ? errs.map(e =>
+      `<tr><td class="mono-sm"><a href="/cnpj/${e.cnpj}">${esc(e.cnpj)}</a></td>
+        <td><span class="pill red">${esc(e.fetch_status)}</span></td>
+        <td class="faint mono-sm">${esc(e.fetch_error || '')}</td>
+        <td class="faint mono-sm">${esc((e.fetched_at || '').slice(0,19))}</td>
+        <td><button class="btn btn-sm btn-ghost" data-re="${e.cnpj}">↻</button></td></tr>`).join('')
+      : '<tr><td colspan="5" class="faint" style="padding:18px">no fetch errors</td></tr>';
+    document.querySelectorAll('#q-errors [data-re]').forEach(b => b.addEventListener('click', async () => {
+      await postForm('/queue/requeue', { which: b.dataset.re });
+      toast('Re-queued ' + b.dataset.re); setTimeout(refresh, 600);
+    }));
+  }
+  document.querySelector('#btn-retry-errors').addEventListener('click', async () => {
+    const r = await postForm('/queue/requeue', { which: 'errors' });
+    toast(`Re-queued ${(await r.json()).requeued} errored CNPJ(s)`); setTimeout(refresh, 600);
+  });
+  document.querySelector('#btn-retry-all').addEventListener('click', async () => {
+    if (!confirm('Re-fetch every CNPJ in the pool?')) return;
+    const r = await postForm('/queue/requeue', { which: 'all' });
+    toast(`Re-queued ${(await r.json()).requeued} CNPJ(s)`); setTimeout(refresh, 600);
+  });
+  refresh(); setInterval(refresh, 2500);
+</script>
+{% endblock %}

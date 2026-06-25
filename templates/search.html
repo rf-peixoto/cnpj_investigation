@@ -29,6 +29,11 @@
             {% for s in situacoes %}<option value="{{ s }}" {{ 'selected' if filters.situacao==s }}>{{ s }}</option>{% endfor %}
           </select></div>
       </div>
+      <div class="row" style="margin-top:12px">
+        <div><label>CEP (postal code)</label><input type="text" name="cep" value="{{ filters.cep }}" placeholder="01001000"></div>
+        <div><label>e-mail domain</label><input type="text" name="domain" value="{{ filters.domain }}" placeholder="grupoX.com.br"></div>
+        <div><label>phone / DDD+prefix</label><input type="text" name="phone" value="{{ filters.phone }}" placeholder="1140041234"></div>
+      </div>
       <div style="margin-top:14px;display:flex;align-items:center;gap:18px;flex-wrap:wrap">
         <label class="checkbox"><input type="checkbox" name="recent_only" {{ 'checked' if filters.recent_only }}>
           only companies &lt; 1 year old</label>

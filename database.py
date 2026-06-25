@@ -6,6 +6,7 @@ that makes owner-correlation queries fast.
 """
 
 import os
+import re
 import json
 import sqlite3
 import threading
@@ -58,11 +59,14 @@ CREATE TABLE IF NOT EXISTS cnpjs (
     municipio             TEXT,
     email                 TEXT,
     capital_social        REAL,
+    capital_band          TEXT,
     porte_empresa         TEXT,
     opcao_simples         TEXT,
     opcao_mei             TEXT,
-    telefones             TEXT,   -- json array
-    qsa                   TEXT,   -- json array
+    logradouro_norm       TEXT,
+    cep_digits            TEXT,
+    telefones             TEXT,   -- json array (kept for the raw view)
+    qsa                   TEXT,   -- json array (kept for the raw view)
     raw_json              TEXT,
     fetch_status          TEXT DEFAULT 'pending',  -- pending|ok|not_found|error
     fetch_error           TEXT,
@@ -72,6 +76,67 @@ CREATE TABLE IF NOT EXISTS cnpjs (
     geocode_status        TEXT DEFAULT 'pending',  -- pending|ok|failed|skip
     review_status         TEXT DEFAULT 'none',     -- none|suspicious|cleared|confirmed
     review_note           TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS phones (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    cnpj    TEXT NOT NULL,
+    ddd     TEXT,
+    numero  TEXT,
+    full    TEXT,
+    prefix  TEXT,
+    tipo    TEXT,
+    FOREIGN KEY (cnpj) REFERENCES cnpjs(cnpj) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS emails (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    cnpj          TEXT NOT NULL,
+    email         TEXT,
+    domain        TEXT,
+    is_free       INTEGER DEFAULT 0,
+    is_accounting INTEGER DEFAULT 0,
+    FOREIGN KEY (cnpj) REFERENCES cnpjs(cnpj) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS cnaes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cnpj         TEXT NOT NULL,
+    codigo       TEXT,
+    descricao    TEXT,
+    is_principal INTEGER DEFAULT 0,
+    division     TEXT,
+    FOREIGN KEY (cnpj) REFERENCES cnpjs(cnpj) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cnpj        TEXT NOT NULL,
+    campaign_id INTEGER,
+    filename    TEXT,
+    stored_name TEXT NOT NULL,
+    mime        TEXT,
+    size        INTEGER,
+    caption     TEXT DEFAULT '',
+    uploaded_at TEXT NOT NULL,
+    FOREIGN KEY (cnpj) REFERENCES cnpjs(cnpj) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS cnpj_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cnpj         TEXT NOT NULL,
+    captured_at  TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    FOREIGN KEY (cnpj) REFERENCES cnpjs(cnpj) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    cnpj         TEXT PRIMARY KEY,
+    added_at     TEXT NOT NULL,
+    recheck_days INTEGER DEFAULT 30,
+    last_checked TEXT,
+    note         TEXT DEFAULT '',
+    FOREIGN KEY (cnpj) REFERENCES cnpjs(cnpj) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS campaign_cnpjs (
@@ -93,25 +158,46 @@ CREATE TABLE IF NOT EXISTS partners (
     faixa_etaria  TEXT,
     FOREIGN KEY (cnpj) REFERENCES cnpjs(cnpj) ON DELETE CASCADE
 );
+"""
 
+SCHEMA_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_partners_cnpj ON partners(cnpj);
 CREATE INDEX IF NOT EXISTS idx_partners_name ON partners(nome_norm);
 CREATE INDEX IF NOT EXISTS idx_partners_cpf  ON partners(cpf_cnpj_mask);
 CREATE INDEX IF NOT EXISTS idx_cnpjs_email   ON cnpjs(email);
 CREATE INDEX IF NOT EXISTS idx_cnpjs_uf      ON cnpjs(uf);
+CREATE INDEX IF NOT EXISTS idx_cnpjs_cep     ON cnpjs(cep_digits);
 CREATE INDEX IF NOT EXISTS idx_cc_cnpj       ON campaign_cnpjs(cnpj);
+CREATE INDEX IF NOT EXISTS idx_phones_full   ON phones(full);
+CREATE INDEX IF NOT EXISTS idx_phones_prefix ON phones(prefix);
+CREATE INDEX IF NOT EXISTS idx_phones_cnpj   ON phones(cnpj);
+CREATE INDEX IF NOT EXISTS idx_emails_domain ON emails(domain);
+CREATE INDEX IF NOT EXISTS idx_emails_cnpj   ON emails(cnpj);
+CREATE INDEX IF NOT EXISTS idx_cnaes_codigo  ON cnaes(codigo);
+CREATE INDEX IF NOT EXISTS idx_cnaes_cnpj    ON cnaes(cnpj);
+CREATE INDEX IF NOT EXISTS idx_attach_cnpj   ON attachments(cnpj);
+CREATE INDEX IF NOT EXISTS idx_history_cnpj  ON cnpj_history(cnpj);
 """
+
+# columns added after the first release -> (table, column, definition)
+_MIGRATIONS = [
+    ("cnpjs", "review_status", "TEXT DEFAULT 'none'"),
+    ("cnpjs", "review_note", "TEXT DEFAULT ''"),
+    ("cnpjs", "capital_band", "TEXT"),
+    ("cnpjs", "logradouro_norm", "TEXT"),
+    ("cnpjs", "cep_digits", "TEXT"),
+    ("partners", "nome_fp", "TEXT"),
+]
 
 
 def init_db():
     with get_conn() as conn:
-        conn.executescript(SCHEMA)
-        # lightweight migration for databases created before review columns existed
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(cnpjs)").fetchall()}
-        if "review_status" not in cols:
-            conn.execute("ALTER TABLE cnpjs ADD COLUMN review_status TEXT DEFAULT 'none'")
-        if "review_note" not in cols:
-            conn.execute("ALTER TABLE cnpjs ADD COLUMN review_note TEXT DEFAULT ''")
+        conn.executescript(SCHEMA)              # tables (full set for fresh DBs)
+        for table, col, ddl in _MIGRATIONS:     # add new columns to legacy DBs
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if cols and col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+        conn.executescript(SCHEMA_INDEXES)      # indexes (after columns exist)
 
 
 # ---------------------------------------------------------------- campaigns ---
@@ -240,7 +326,9 @@ def next_pending_cnpj():
 
 
 def save_cnpj_record(cnpj, data):
-    """Persist a successful API payload + its normalized partner rows."""
+    """Persist a successful API payload, its normalized child rows (partners,
+    phones, e-mails, CNAEs) and a history snapshot for later diffing."""
+    addr = data.get("address_keys") or {}
     with _write_lock, get_conn() as conn:
         conn.execute(
             """
@@ -248,8 +336,9 @@ def save_cnpj_record(cnpj, data):
                 razao_social=?, nome_fantasia=?, situacao_cadastral=?, data_situacao=?,
                 matriz_filial=?, data_inicio_atividade=?, cnae_principal=?, cnae_principal_desc=?,
                 natureza_juridica=?, tipo_logradouro=?, logradouro=?, numero=?, complemento=?,
-                bairro=?, cep=?, uf=?, municipio=?, email=?, capital_social=?, porte_empresa=?,
-                opcao_simples=?, opcao_mei=?, telefones=?, qsa=?, raw_json=?,
+                bairro=?, cep=?, uf=?, municipio=?, email=?, capital_social=?, capital_band=?,
+                porte_empresa=?, opcao_simples=?, opcao_mei=?, logradouro_norm=?, cep_digits=?,
+                telefones=?, qsa=?, raw_json=?,
                 fetch_status='ok', fetch_error=NULL, fetched_at=?
             WHERE cnpj=?
             """,
@@ -259,20 +348,66 @@ def save_cnpj_record(cnpj, data):
                 data["cnae_principal"], data["cnae_principal_desc"], data["natureza_juridica"],
                 data["tipo_logradouro"], data["logradouro"], data["numero"], data["complemento"],
                 data["bairro"], data["cep"], data["uf"], data["municipio"], data["email"],
-                data["capital_social"], data["porte_empresa"], data["opcao_simples"],
-                data["opcao_mei"], json.dumps(data["telefones"], ensure_ascii=False),
+                data["capital_social"], data.get("capital_band"), data["porte_empresa"],
+                data["opcao_simples"], data["opcao_mei"], addr.get("logradouro_norm"),
+                addr.get("cep"), json.dumps(data["telefones"], ensure_ascii=False),
                 json.dumps(data["qsa"], ensure_ascii=False), data["raw_json"], now_iso(), cnpj,
             ),
         )
-        conn.execute("DELETE FROM partners WHERE cnpj = ?", (cnpj,))
+
+        # rebuild normalized child tables
+        for tbl in ("partners", "phones", "emails", "cnaes"):
+            conn.execute(f"DELETE FROM {tbl} WHERE cnpj = ?", (cnpj,))
         for p in data["partners"]:
             conn.execute(
                 """INSERT INTO partners
-                   (cnpj, nome_socio, nome_norm, cpf_cnpj_mask, qualificacao, data_entrada, faixa_etaria)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (cnpj, p["nome_socio"], p["nome_norm"], p["cpf_cnpj_mask"],
-                 p["qualificacao"], p["data_entrada"], p["faixa_etaria"]),
+                   (cnpj, nome_socio, nome_norm, nome_fp, cpf_cnpj_mask, qualificacao,
+                    data_entrada, faixa_etaria)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (cnpj, p["nome_socio"], p["nome_norm"], p.get("nome_fp", ""),
+                 p["cpf_cnpj_mask"], p["qualificacao"], p["data_entrada"], p["faixa_etaria"]),
             )
+        for ph in data.get("phones_norm", []):
+            conn.execute(
+                "INSERT INTO phones (cnpj, ddd, numero, full, prefix, tipo) VALUES (?,?,?,?,?,?)",
+                (cnpj, ph["ddd"], ph["numero"], ph["full"], ph["prefix"], ph.get("tipo", "")),
+            )
+        for em in data.get("emails_norm", []):
+            conn.execute(
+                "INSERT INTO emails (cnpj, email, domain, is_free, is_accounting) VALUES (?,?,?,?,?)",
+                (cnpj, em["email"], em["domain"], int(em["is_free"]), int(em["is_accounting"])),
+            )
+        for cn in data.get("cnaes_norm", []):
+            from enrich import cnae_division
+            conn.execute(
+                "INSERT INTO cnaes (cnpj, codigo, descricao, is_principal, division) VALUES (?,?,?,?,?)",
+                (cnpj, cn["codigo"], cn["descricao"], cn["is_principal"], cnae_division(cn["codigo"])),
+            )
+
+        # history snapshot for change-tracking / diffs
+        snap = {
+            "razao_social": data["razao_social"], "situacao_cadastral": data["situacao_cadastral"],
+            "data_situacao": data["data_situacao"], "capital_social": data["capital_social"],
+            "email": data["email"], "logradouro": data["logradouro"], "numero": data["numero"],
+            "bairro": data["bairro"], "municipio": data["municipio"], "uf": data["uf"],
+            "cep": data["cep"], "porte_empresa": data["porte_empresa"],
+            "cnae_principal": data["cnae_principal"], "opcao_mei": data["opcao_mei"],
+            "opcao_simples": data["opcao_simples"],
+            "partners": sorted(p["nome_socio"] for p in data["partners"]),
+            "phones": sorted(ph["full"] for ph in data.get("phones_norm", [])),
+        }
+        conn.execute(
+            "INSERT INTO cnpj_history (cnpj, captured_at, snapshot_json) VALUES (?,?,?)",
+            (cnpj, now_iso(), json.dumps(snap, ensure_ascii=False)),
+        )
+        # keep only the most recent 25 snapshots per CNPJ
+        conn.execute(
+            """DELETE FROM cnpj_history WHERE cnpj = ? AND id NOT IN
+               (SELECT id FROM cnpj_history WHERE cnpj = ? ORDER BY id DESC LIMIT 25)""",
+            (cnpj, cnpj),
+        )
+        # if on the watchlist, stamp the recheck time
+        conn.execute("UPDATE watchlist SET last_checked = ? WHERE cnpj = ?", (now_iso(), cnpj))
 
 
 def mark_cnpj_status(cnpj, status, error=None):
@@ -341,7 +476,19 @@ def search_cnpjs(filters):
     if filters.get("email"):
         like("c.email", filters["email"])
     if filters.get("cnae"):
-        like("c.cnae_principal", filters["cnae"])
+        where.append(
+            "(c.cnae_principal LIKE ? OR c.cnpj IN (SELECT cnpj FROM cnaes WHERE codigo LIKE ?))")
+        params.extend([f"%{filters['cnae'].strip()}%", f"%{re.sub(r'[^0-9]','',filters['cnae'])}%"])
+    if filters.get("cep"):
+        where.append("c.cep_digits = ?")
+        params.append(re.sub(r"\D", "", filters["cep"]))
+    if filters.get("domain"):
+        where.append("c.cnpj IN (SELECT cnpj FROM emails WHERE domain LIKE ?)")
+        params.append(f"%{filters['domain'].strip().lower()}%")
+    if filters.get("phone"):
+        ph = re.sub(r"\D", "", filters["phone"])
+        where.append("c.cnpj IN (SELECT cnpj FROM phones WHERE full LIKE ? OR prefix LIKE ?)")
+        params.extend([f"%{ph}%", f"%{ph}%"])
     if filters.get("situacao"):
         where.append("c.situacao_cadastral = ?"); params.append(filters["situacao"].strip())
     if filters.get("socio"):
@@ -494,3 +641,231 @@ def companies_for_export(campaign_id):
             (campaign_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ----------------------------------------------------------- attachments -----
+
+def add_attachment(cnpj, campaign_id, filename, stored_name, mime, size, caption=""):
+    with _write_lock, get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO attachments
+               (cnpj, campaign_id, filename, stored_name, mime, size, caption, uploaded_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (cnpj, campaign_id, filename, stored_name, mime, size, caption.strip(), now_iso()),
+        )
+        return cur.lastrowid
+
+
+def list_attachments(cnpj):
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM attachments WHERE cnpj = ? ORDER BY uploaded_at DESC", (cnpj,)
+        ).fetchall()]
+
+
+def get_attachment(att_id):
+    with get_conn() as conn:
+        r = conn.execute("SELECT * FROM attachments WHERE id = ?", (att_id,)).fetchone()
+        return dict(r) if r else None
+
+
+def delete_attachment(att_id):
+    with _write_lock, get_conn() as conn:
+        r = conn.execute("SELECT * FROM attachments WHERE id = ?", (att_id,)).fetchone()
+        conn.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
+        return dict(r) if r else None
+
+
+# ------------------------------------------------------ history & diffing -----
+
+def cnpj_history(cnpj):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT captured_at, snapshot_json FROM cnpj_history WHERE cnpj = ? ORDER BY id DESC",
+            (cnpj,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                out.append({"captured_at": r["captured_at"], "snapshot": json.loads(r["snapshot_json"])})
+            except ValueError:
+                pass
+        return out
+
+
+def _diff_snapshots(old, new):
+    fields = ["razao_social", "situacao_cadastral", "data_situacao", "capital_social",
+              "email", "logradouro", "numero", "bairro", "municipio", "uf", "cep",
+              "porte_empresa", "cnae_principal", "opcao_mei", "opcao_simples"]
+    changes = []
+    for f in fields:
+        a, b = old.get(f), new.get(f)
+        if a != b:
+            changes.append({"field": f, "old": a, "new": b})
+    for f in ("partners", "phones"):
+        a, b = set(old.get(f) or []), set(new.get(f) or [])
+        if a != b:
+            changes.append({"field": f, "removed": sorted(a - b), "added": sorted(b - a)})
+    return changes
+
+
+def cnpj_latest_diff(cnpj):
+    """Diff between the two most recent snapshots (what changed on last refresh)."""
+    hist = cnpj_history(cnpj)
+    if len(hist) < 2:
+        return {"available": False, "changes": []}
+    return {"available": True, "from": hist[1]["captured_at"], "to": hist[0]["captured_at"],
+            "changes": _diff_snapshots(hist[1]["snapshot"], hist[0]["snapshot"])}
+
+
+# --------------------------------------------------------------- watchlist ---
+
+def add_to_watchlist(cnpj, recheck_days=30, note=""):
+    with _write_lock, get_conn() as conn:
+        conn.execute(
+            """INSERT INTO watchlist (cnpj, added_at, recheck_days, note)
+               VALUES (?,?,?,?)
+               ON CONFLICT(cnpj) DO UPDATE SET recheck_days=excluded.recheck_days,
+                                               note=excluded.note""",
+            (cnpj, now_iso(), int(recheck_days), note.strip()),
+        )
+
+
+def remove_from_watchlist(cnpj):
+    with _write_lock, get_conn() as conn:
+        conn.execute("DELETE FROM watchlist WHERE cnpj = ?", (cnpj,))
+
+
+def is_watched(cnpj):
+    with get_conn() as conn:
+        return conn.execute("SELECT 1 FROM watchlist WHERE cnpj = ?", (cnpj,)).fetchone() is not None
+
+
+def list_watchlist():
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT w.*, c.razao_social, c.situacao_cadastral, c.fetch_status,
+                   CAST(julianday('now') - julianday(COALESCE(w.last_checked, w.added_at)) AS INT) AS days_since,
+                   CASE WHEN w.last_checked IS NULL
+                        OR julianday('now') - julianday(w.last_checked) >= w.recheck_days
+                        THEN 1 ELSE 0 END AS due
+            FROM watchlist w
+            LEFT JOIN cnpjs c ON c.cnpj = w.cnpj
+            ORDER BY due DESC, days_since DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def watchlist_due():
+    """CNPJs whose recheck interval has elapsed; returns the cnpj strings."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT cnpj FROM watchlist
+               WHERE last_checked IS NULL
+                  OR julianday('now') - julianday(last_checked) >= recheck_days"""
+        ).fetchall()
+        return [r["cnpj"] for r in rows]
+
+
+# ---------------------------------------------------- queue / retry control ---
+
+def fetch_queue_status():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT fetch_status AS s, COUNT(*) AS n FROM cnpjs GROUP BY fetch_status"
+        ).fetchall()
+        return {r["s"]: r["n"] for r in rows}
+
+
+def list_fetch_errors(limit=200):
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT cnpj, fetch_status, fetch_error, fetched_at FROM cnpjs
+               WHERE fetch_status IN ('error','not_found') ORDER BY fetched_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def requeue(which="errors", campaign_id=None):
+    """Reset selected CNPJs back to 'pending' so the worker retries them.
+    which: 'errors' (error+not_found) | 'all' | a specific cnpj string."""
+    with _write_lock, get_conn() as conn:
+        if which == "errors":
+            where, params = "fetch_status IN ('error','not_found')", []
+        elif which == "all":
+            where, params = "fetch_status != 'pending'", []
+        else:
+            where, params = "cnpj = ?", [which]
+        if campaign_id is not None:
+            where += " AND cnpj IN (SELECT cnpj FROM campaign_cnpjs WHERE campaign_id = ?)"
+            params.append(campaign_id)
+        cur = conn.execute(
+            f"UPDATE cnpjs SET fetch_status='pending', fetch_error=NULL WHERE {where}", params)
+        return cur.rowcount
+
+
+# ------------------------------------------- campaign import / export / merge --
+
+def campaign_export(campaign_id):
+    """Full portable snapshot of a campaign and the records it references."""
+    camp = get_campaign(campaign_id)
+    if not camp:
+        return None
+    rows = campaign_cnpjs(campaign_id)
+    return {
+        "campaign": {"name": camp["name"], "description": camp["description"]},
+        "cnpjs": [r["cnpj"] for r in rows],
+        "records": [
+            {k: r.get(k) for k in (
+                "cnpj", "razao_social", "nome_fantasia", "situacao_cadastral",
+                "data_inicio_atividade", "uf", "municipio", "review_status", "review_note")}
+            for r in rows
+        ],
+    }
+
+
+def campaign_import(data):
+    """Create a campaign from an exported dict and queue its CNPJs.
+    Returns (campaign_id, added, invalid)."""
+    import cnpj_utils
+    camp = data.get("campaign") or {}
+    name = (camp.get("name") or "imported campaign").strip()
+    cid = create_campaign(name, camp.get("description", ""))
+    added = invalid = 0
+    seen = set()
+    for raw in data.get("cnpjs", []):
+        clean = cnpj_utils.clean_cnpj(raw)
+        if clean and clean not in seen:
+            seen.add(clean)
+            add_cnpj_to_campaign(cid, clean)
+            added += 1
+        elif not clean:
+            invalid += 1
+    # carry over review status when provided and the record already exists
+    with _write_lock, get_conn() as conn:
+        for rec in data.get("records", []):
+            c = cnpj_utils.clean_cnpj(rec.get("cnpj", ""))
+            if c and rec.get("review_status") in ("suspicious", "cleared", "confirmed"):
+                conn.execute("UPDATE cnpjs SET review_status=?, review_note=? WHERE cnpj=?",
+                             (rec["review_status"], rec.get("review_note", ""), c))
+    return cid, added, invalid
+
+
+def merge_campaigns(src_id, dst_id):
+    """Move all CNPJ memberships from src into dst, then delete src."""
+    if src_id == dst_id:
+        return 0
+    moved = 0
+    with _write_lock, get_conn() as conn:
+        rows = conn.execute("SELECT cnpj FROM campaign_cnpjs WHERE campaign_id = ?", (src_id,)).fetchall()
+        for r in rows:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO campaign_cnpjs (campaign_id, cnpj, added_at) VALUES (?,?,?)",
+                (dst_id, r["cnpj"], now_iso()))
+            moved += cur.rowcount
+        conn.execute("DELETE FROM campaign_cnpjs WHERE campaign_id = ?", (src_id,))
+        conn.execute("DELETE FROM campaigns WHERE id = ?", (src_id,))
+    return moved

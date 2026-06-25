@@ -10,7 +10,7 @@
 <div class="eyebrow">{{ row.natureza_juridica or 'company' }}</div>
 <h1 style="margin-bottom:4px">{{ row.razao_social or row.cnpj }}</h1>
 <div class="muted" style="margin-bottom:6px">
-  {% if row.nome_fantasia %}{{ row.nome_fantasia }} · {% endif %}{{ row.cnpj }}
+  {% if row.nome_fantasia %}{{ row.nome_fantasia }} · {% endif %}{{ cnpj_fmt or row.cnpj }}
 </div>
 <div style="margin-bottom:18px">
   {% if row.situacao_cadastral == 'Ativa' %}
@@ -40,6 +40,7 @@
   </span></div>
   <div class="bd">
     <form method="post" action="{{ url_for('cnpj_review', cnpj=row.cnpj) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="row" style="align-items:flex-end">
         <div style="flex:0 0 200px">
           <label for="review_status">status</label>
@@ -57,6 +58,109 @@
         <button class="btn-primary btn-sm" type="submit">save</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- watchlist + recheck -->
+<div class="panel"><div class="hd"><h2>Watchlist &amp; recheck</h2>
+  <span class="count" id="watch-state">{{ 'on watchlist' if watched else 'not watched' }}</span></div>
+  <div class="bd">
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:0 0 160px">
+        <label for="recheck-days">recheck every (days)</label>
+        <input type="number" id="recheck-days" min="1" value="30">
+      </div>
+      <div style="flex:1">
+        <label for="watch-note">note</label>
+        <input type="text" id="watch-note" placeholder="why is this on watch…">
+      </div>
+      <button class="btn-primary btn-sm" id="btn-watch">{{ 'update watch' if watched else '+ add to watchlist' }}</button>
+      {% if watched %}<button class="btn-sm btn-danger" id="btn-unwatch">remove</button>{% endif %}
+    </div>
+    <div class="faint mono-sm" style="margin-top:8px">
+      due CNPJs are re-fetched from the <a href="{{ url_for('watchlist') }}">watchlist page</a>;
+      each refresh is snapshotted so changes are tracked below.
+    </div>
+  </div>
+</div>
+
+<!-- evidence attachments -->
+<div class="panel"><div class="hd"><h2>Evidence attachments</h2>
+  <span class="count" id="att-count">{{ attachments|length }}</span></div>
+  <div class="bd">
+    <div class="row" style="align-items:flex-end;margin-bottom:10px">
+      <div style="flex:0 0 220px">
+        <label for="att-file">image (png / jpg / jpeg, ≤ 8 MB)</label>
+        <input type="file" id="att-file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" style="border:none;padding:6px 0">
+      </div>
+      <div style="flex:1">
+        <label for="att-caption">caption</label>
+        <input type="text" id="att-caption" placeholder="e.g. photo of the building / partner">
+      </div>
+      <button class="btn-primary btn-sm" id="btn-upload">upload</button>
+      <span class="faint mono-sm" id="att-status"></span>
+    </div>
+    <div class="att-gallery" id="att-gallery">
+      {% for a in attachments %}
+      <figure class="att" data-id="{{ a.id }}">
+        <a href="{{ url_for('serve_attachment', att_id=a.id) }}" target="_blank">
+          <img src="{{ url_for('serve_attachment', att_id=a.id) }}" alt="{{ a.caption or a.filename }}"></a>
+        <figcaption>
+          <span class="mono-sm">{{ a.caption or a.filename }}</span>
+          <button class="btn btn-sm btn-ghost att-del" data-id="{{ a.id }}" title="delete">✕</button>
+        </figcaption>
+      </figure>
+      {% else %}
+      <div class="faint" style="padding:6px 0">No attachments yet.</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<!-- change history + latest diff -->
+<div class="panel"><div class="hd"><h2>Change history</h2>
+  <span class="count">{{ history|length }} snapshot(s)</span></div>
+  <div class="bd">
+    {% if diff.available and diff.changes %}
+    <div class="diff-box">
+      <div class="faint mono-sm" style="margin-bottom:6px">changes at last refresh
+        ({{ diff.from[:19] }} → {{ diff.to[:19] }}):</div>
+      {% for ch in diff.changes %}
+        {% if ch.field in ('partners','phones') %}
+          <div class="diff-row"><span class="diff-field">{{ ch.field }}</span>
+            {% for x in ch.added %}<span class="pill green">+ {{ x }}</span>{% endfor %}
+            {% for x in ch.removed %}<span class="pill red">− {{ x }}</span>{% endfor %}
+          </div>
+        {% else %}
+          <div class="diff-row"><span class="diff-field">{{ ch.field }}</span>
+            <span class="pill red">{{ ch.old if ch.old is not none else '—' }}</span>
+            <span class="diff-arrow">→</span>
+            <span class="pill green">{{ ch.new if ch.new is not none else '—' }}</span>
+          </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% elif diff.available %}
+      <div class="faint mono-sm">no field changes between the last two refreshes.</div>
+    {% else %}
+      <div class="faint mono-sm">only one snapshot so far — refresh later to see what changed.</div>
+    {% endif %}
+
+    {% if history %}
+    <div class="timeline">
+      {% for h in history %}
+      <div class="tl-item">
+        <span class="tl-dot"></span>
+        <span class="mono-sm">{{ h.captured_at[:19] }}</span>
+        <span class="faint mono-sm">
+          {{ h.snapshot.situacao_cadastral }} ·
+          cap {{ h.snapshot.capital_social | brl }} ·
+          {{ h.snapshot.partners|length }} partner(s)
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
   </div>
 </div>
 
@@ -116,4 +220,64 @@
   <a href="https://api.opencnpj.org/{{ row.cnpj }}" target="_blank">raw API record →</a>
   · last fetched {{ row.fetched_at or 'never' }}
 </p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const CNPJ = "{{ row.cnpj }}";
+  const $ = s => document.querySelector(s);
+
+  // watchlist
+  $('#btn-watch')?.addEventListener('click', async () => {
+    const r = await postForm(`/cnpj/${CNPJ}/watch`, {
+      recheck_days: $('#recheck-days').value, note: $('#watch-note').value });
+    const j = await r.json();
+    $('#watch-state').textContent = j.watched ? `on watchlist · every ${j.recheck_days}d` : 'not watched';
+    toast(j.watched ? 'Added to watchlist' : 'Updated');
+  });
+  $('#btn-unwatch')?.addEventListener('click', async () => {
+    await postForm(`/cnpj/${CNPJ}/watch`, { action: 'remove' });
+    $('#watch-state').textContent = 'not watched';
+    toast('Removed from watchlist'); location.reload();
+  });
+
+  // attachment upload
+  $('#btn-upload')?.addEventListener('click', async () => {
+    const f = $('#att-file').files[0];
+    if (!f) { $('#att-status').textContent = 'pick an image'; return; }
+    const fd = new FormData();
+    fd.append('file', f); fd.append('caption', $('#att-caption').value);
+    $('#att-status').textContent = 'uploading…';
+    try {
+      const r = await postForm(`/cnpj/${CNPJ}/attachments`, fd);
+      const j = await r.json();
+      if (j.error) { $('#att-status').textContent = 'error: ' + j.error; toast(j.error, true); return; }
+      $('#att-status').textContent = '';
+      const g = $('#att-gallery');
+      const empty = g.querySelector('.faint'); if (empty) empty.remove();
+      const fig = document.createElement('figure');
+      fig.className = 'att'; fig.dataset.id = j.id;
+      fig.innerHTML = `<a href="/attachments/${j.id}/file" target="_blank">
+          <img src="/attachments/${j.id}/file" alt=""></a>
+        <figcaption><span class="mono-sm">${(j.caption || j.filename).replace(/[<>&]/g,'')}</span>
+        <button class="btn btn-sm btn-ghost att-del" data-id="${j.id}">✕</button></figcaption>`;
+      g.prepend(fig);
+      bindDelete(fig.querySelector('.att-del'));
+      $('#att-file').value = ''; $('#att-caption').value = '';
+      $('#att-count').textContent = document.querySelectorAll('#att-gallery .att').length;
+      toast('Attachment uploaded');
+    } catch (e) { $('#att-status').textContent = 'upload failed'; }
+  });
+
+  function bindDelete(btn) {
+    btn?.addEventListener('click', async () => {
+      if (!confirm('Delete this attachment?')) return;
+      await postForm(`/attachments/${btn.dataset.id}/delete`);
+      btn.closest('.att').remove();
+      $('#att-count').textContent = document.querySelectorAll('#att-gallery .att').length;
+      toast('Deleted');
+    });
+  }
+  document.querySelectorAll('.att-del').forEach(bindDelete);
+</script>
 {% endblock %}

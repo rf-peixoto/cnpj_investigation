@@ -12,6 +12,9 @@ import json
 import unicodedata
 import requests
 
+import cnpj_utils
+import enrich
+
 OPENCNPJ_URL = "https://api.opencnpj.org/{cnpj}"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 # A browser-like UA avoids Cloudflare bot-challenges some hosts apply to the
@@ -26,11 +29,14 @@ PLACEHOLDER_CPF = "***000000**"
 # ------------------------------------------------------------- normalizers ---
 
 def clean_cnpj(raw):
-    """Strip punctuation and keep 14 digits. Returns None if not a valid length."""
-    digits = re.sub(r"\D", "", raw or "")
-    if len(digits) == 14:
-        return digits
-    return None
+    """Validate (length, charset, both check digits) and return the canonical
+    14-char CNPJ, or None. Supports legacy numeric and 2026 alphanumeric CNPJs.
+    Invalid numbers are rejected here so they never reach the fetch queue."""
+    return cnpj_utils.clean_cnpj(raw)
+
+
+def format_cnpj(raw):
+    return cnpj_utils.format_cnpj(raw)
 
 
 def normalize_name(name):
@@ -52,10 +58,12 @@ def parse_capital(value):
 
 
 def normalize_payload(raw):
-    """Map a raw opencnpj JSON object into the flat shape the DB expects."""
-    cnaes_principal = raw.get("cnaes") or []
+    """Map a raw opencnpj JSON object into the flat shape the DB expects, plus
+    normalized child collections (phones, emails, cnaes, address keys) used to
+    populate the indexed correlation tables."""
+    cnaes_raw = raw.get("cnaes") or []
     principal_desc = ""
-    for c in cnaes_principal:
+    for c in cnaes_raw:
         if c.get("is_principal"):
             principal_desc = c.get("descricao", "")
             break
@@ -66,11 +74,48 @@ def normalize_payload(raw):
         partners.append({
             "nome_socio": nome,
             "nome_norm": normalize_name(nome),
+            "nome_fp": enrich.name_fingerprint(nome),
             "cpf_cnpj_mask": p.get("cnpj_cpf_socio", ""),
             "qualificacao": p.get("qualificacao_socio", ""),
             "data_entrada": p.get("data_entrada_sociedade", ""),
             "faixa_etaria": p.get("faixa_etaria", ""),
         })
+
+    # normalized phones
+    phones_norm = []
+    for t in raw.get("telefones") or []:
+        pp = enrich.phone_parts(t.get("ddd"), t.get("numero"))
+        if pp["full"]:
+            pp["tipo"] = t.get("tipo", "")
+            phones_norm.append(pp)
+
+    # normalized e-mail(s) — the API exposes one, but model it as a collection
+    emails_norm = []
+    email = (raw.get("email") or "").strip().lower()
+    if email:
+        emails_norm.append(enrich.email_parts(email))
+
+    # normalized CNAEs (principal + secondary)
+    principal_code = enrich.cnae_clean(raw.get("cnae_principal"))
+    cnaes_norm = []
+    seen_cnae = set()
+    if principal_code:
+        cnaes_norm.append({"codigo": principal_code, "descricao": principal_desc,
+                           "is_principal": 1})
+        seen_cnae.add(principal_code)
+    for c in cnaes_raw:
+        code = enrich.cnae_clean(c.get("codigo") or c.get("cnae"))
+        if code and code not in seen_cnae:
+            seen_cnae.add(code)
+            cnaes_norm.append({"codigo": code, "descricao": c.get("descricao", ""),
+                               "is_principal": 1 if c.get("is_principal") else 0})
+
+    capital = parse_capital(raw.get("capital_social"))
+    addr_keys = enrich.address_keys({
+        "tipo_logradouro": raw.get("tipo_logradouro"),
+        "logradouro": raw.get("logradouro"), "numero": raw.get("numero"),
+        "cep": raw.get("cep"), "municipio": raw.get("municipio"), "uf": raw.get("uf"),
+    })
 
     return {
         "razao_social": raw.get("razao_social", ""),
@@ -90,14 +135,19 @@ def normalize_payload(raw):
         "cep": raw.get("cep", ""),
         "uf": raw.get("uf", ""),
         "municipio": raw.get("municipio", ""),
-        "email": (raw.get("email") or "").strip().lower(),
-        "capital_social": parse_capital(raw.get("capital_social")),
+        "email": email,
+        "capital_social": capital,
+        "capital_band": enrich.capital_band(capital),
         "porte_empresa": raw.get("porte_empresa", ""),
         "opcao_simples": raw.get("opcao_simples", ""),
         "opcao_mei": raw.get("opcao_mei", ""),
         "telefones": raw.get("telefones") or [],
         "qsa": raw.get("QSA") or [],
         "partners": partners,
+        "phones_norm": phones_norm,
+        "emails_norm": emails_norm,
+        "cnaes_norm": cnaes_norm,
+        "address_keys": addr_keys,
         "raw_json": json.dumps(raw, ensure_ascii=False),
     }
 
