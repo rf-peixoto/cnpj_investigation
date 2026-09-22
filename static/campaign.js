@@ -12,17 +12,21 @@ const DIM = {
   address_full:           {c: '#4fc3dc', l: 'address',             low: false},
   street_num_cep:         {c: '#4fc3dc', l: 'street+nº+CEP',       low: false},
   cep:                    {c: '#3a7d8c', l: 'CEP',                 low: true},
+  street_name:            {c: '#2f8fa8', l: 'same street',         low: true},
   email:                  {c: '#e8b84b', l: 'e-mail',              low: false},
   email_domain:           {c: '#e8b84b', l: 'e-mail domain',       low: false},
   accountant:             {c: '#d98b2b', l: 'accountant',          low: false},
   phone:                  {c: '#3ddc84', l: 'phone',               low: false},
   phone_prefix:           {c: '#2a9d6a', l: 'phone prefix',        low: true},
   regday:                 {c: '#ff8a4b', l: 'reg-day',             low: false},
+  regday_muni:            {c: '#ff8a4b', l: 'reg-day+city',        low: false},
   regday_muni_cnae:       {c: '#ff5d57', l: 'reg-day+city+CNAE',   low: false},
   juridical_cnae_capital: {c: '#888888', l: 'nature+CNAE+capital', low: true},
+  cnae_secondary:         {c: '#c9a34e', l: 'secondary CNAE',      low: true},
   root8:                  {c: '#9a86ff', l: 'CNPJ root',           low: false},
   geo:                    {c: '#3ddc84', l: 'geo-proximity',       low: false},
   capital:                {c: '#888888', l: 'capital',             low: true},
+  closure_batch:          {c: '#ff5d57', l: 'batch closure',       low: false},
   adjacent:               {c: '#9a86ff', l: 'adjacent CNPJ',       low: false},
 };
 const dimColor = d => (DIM[d] || {}).c || '#888';
@@ -280,8 +284,18 @@ $('#btn-why').addEventListener('click', () => runPath('why'));
 /* ---------------------------------------------------------------- map --- */
 function ensureMap() {
   if (map) return;
-  map = L.map('map', { zoomControl: true, attributionControl: false }).setView([-14.4, -51.9], 4);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
+  map = L.map('map', { zoomControl: true, attributionControl: true }).setView([-14.4, -51.9], 4);
+  // OpenStreetMap's standard tile server: free, open-source (ODbL data / open
+  // tile service), no API key or account required. It replaced the previous
+  // CartoDB basemap, which now gates its tiles behind a registered API key.
+  // The tiles are light by default; `.map-dark-tiles` (style.css) applies a
+  // CSS filter to re-tint them so the map still matches the app's dark theme
+  // — there's no free/keyless dark-styled raster source to swap in directly.
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    className: 'map-dark-tiles',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+  }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
 }
 function renderMap(points) {
@@ -310,8 +324,8 @@ function renderMap(points) {
 /* ----------------------------------------------------------- companies -- */
 function evidencePill(e) {
   const d = DIM[e.signal];
-  const col = d ? d.c : (/NULA|INAPTA|SUSPENSA|BAIXADA|farm|hub|front-man|ring|flip|void|ceiling/i.test(e.signal) ? '#ff5d57'
-                : /recent|capital|risky|extreme|twin|status/i.test(e.signal) ? '#e8b84b' : '#4fc3dc');
+  const col = d ? d.c : (/NULA|INAPTA|SUSPENSA|BAIXADA|farm|hub|front-man|ring|flip|void|ceiling|special_situation|serial_admin/i.test(e.signal) ? '#ff5d57'
+                : /recent|capital|risky|extreme|twin|status|regime_exit/i.test(e.signal) ? '#e8b84b' : '#4fc3dc');
   const conf = Math.round((e.confidence || 0) * 100);
   const tip = `${e.detail || e.signal} · weight ${e.weight} · confidence ${conf}% · source: ${e.source}` +
     (e.matched && e.matched.length ? ` · ${e.matched.length} linked` : '');
@@ -409,6 +423,7 @@ function renderClusters(clusters) {
     ['address_full', 'Shared full address'],
     ['street_num_cep', 'Same street + nº + CEP'],
     ['cep', 'Same CEP'],
+    ['street_name', 'Same street (any number)'],
     ['email', 'Shared e-mails'],
     ['email_domain', 'Shared e-mail domain'],
     ['accountant', 'Shared accounting contact'],
@@ -416,9 +431,12 @@ function renderClusters(clusters) {
     ['phone_prefix', 'Same DDD + phone prefix'],
     ['root8', 'Same 8-char CNPJ root'],
     ['regday_muni_cnae', 'Same open-date + city + activity'],
+    ['regday_muni', 'Same open-date + city'],
     ['regday', 'Same registration day'],
     ['geo', 'Geographically co-located'],
+    ['closure_batch', 'Coordinated status change (batch)'],
     ['juridical_cnae_capital', 'Same nature + activity + capital band'],
+    ['cnae_secondary', 'Shared secondary business activity'],
     ['capital', 'Identical declared capital'],
   ];
   const wrap = $('#clusters');

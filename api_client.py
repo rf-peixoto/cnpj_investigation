@@ -95,7 +95,10 @@ def normalize_payload(raw):
     if email:
         emails_norm.append(enrich.email_parts(email))
 
-    # normalized CNAEs (principal + secondary)
+    # normalized CNAEs (principal + secondary). The live API exposes secondary
+    # activities as a plain list of codes under "cnaes_secundarios" (no
+    # descriptions) rather than as objects in "cnaes" (which is typically
+    # empty) — both shapes are handled here so secondary CNAEs are never lost.
     principal_code = enrich.cnae_clean(raw.get("cnae_principal"))
     cnaes_norm = []
     seen_cnae = set()
@@ -109,6 +112,11 @@ def normalize_payload(raw):
             seen_cnae.add(code)
             cnaes_norm.append({"codigo": code, "descricao": c.get("descricao", ""),
                                "is_principal": 1 if c.get("is_principal") else 0})
+    for code in (raw.get("cnaes_secundarios") or []):
+        code = enrich.cnae_clean(code)
+        if code and code not in seen_cnae:
+            seen_cnae.add(code)
+            cnaes_norm.append({"codigo": code, "descricao": "", "is_principal": 0})
 
     capital = parse_capital(raw.get("capital_social"))
     addr_keys = enrich.address_keys({

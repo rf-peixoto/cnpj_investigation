@@ -175,7 +175,12 @@
     </dl>
   </div></div>
 
-  <div class="panel"><div class="hd"><h2>Location &amp; contact</h2></div><div class="bd">
+  <div class="panel"><div class="hd"><h2>Location &amp; contact</h2>
+    {% if gmaps_url %}
+    <a class="btn btn-sm" href="{{ gmaps_url }}" target="_blank" rel="noopener"
+       title="Open this registered address on Google Maps">⌖ open on Google Maps</a>
+    {% endif %}
+  </div><div class="bd">
     <dl class="kv">
       <dt>address</dt><dd>{{ row.tipo_logradouro }} {{ row.logradouro }}, {{ row.numero }}
         {% if row.complemento %}({{ row.complemento }}){% endif %}</dd>
@@ -211,8 +216,8 @@
 </div>
 
 <div class="panel"><div class="hd"><h2>All CNAE codes</h2></div><div class="bd">
-  {% for c in raw.cnaes %}
-    <span class="pill {{ 'green' if c.is_principal }}">{{ c.codigo }} · {{ c.descricao }}</span>
+  {% for c in cnaes %}
+    <span class="pill {{ 'green' if c.is_principal }}">{{ c.codigo }}{% if c.descricao %} · {{ c.descricao }}{% endif %}</span>
   {% else %}<span class="faint">—</span>{% endfor %}
 </div></div>
 

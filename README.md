@@ -46,11 +46,19 @@ addition to the raw JSON, which powers fast correlation and richer search
 evidence pill in the companies table to see exactly why a company scored what it
 did. Risk flags are treated as leads, not proof.
 
-**4 · Many more correlations:** shared CEP; same street+number+CEP (fuzzy address
-normalization); same e-mail domain (with accounting-office detection); shared
-DDD+phone prefix; same nature+CNAE+capital-band; same registration-day+city+CNAE;
-8-character CNPJ root clustering; **fuzzy partner-name matching** for small
-spelling differences; and geographic proximity clustering after geocoding.
+**4 · Many more correlations:** shared CEP; same street (any number) and same
+street+number+CEP (fuzzy address normalization); same e-mail domain (with
+accounting-office detection); shared DDD+phone prefix; same nature+CNAE+capital
+band; same registration-day+city, and +CNAE; shared **secondary** CNAE (fixed
+to read the live API's `cnaes_secundarios` field, which the previous version
+silently missed); coordinated status changes (same closure/suspension date +
+official reason + city — batch shell wind-downs); 8-character CNPJ root
+clustering; **fuzzy partner-name matching** for small spelling differences; and
+geographic proximity clustering after geocoding. Per-company heuristics now
+also cover a company's `situacao_especial` (e.g. *em liquidação*, falência),
+recent Simples/MEI exclusion, and a **partner-role-aware** front-man signal
+that weighs a partner who is administrator/director across many companies
+more heavily than one who is only ever a passive quotista.
 
 **5 · Investigative graph ergonomics:** edge labels naming the exact reason two
 records link; filter by signal type and minimum cluster size; hide low-signal
@@ -60,7 +68,9 @@ between two CNPJs; and **"why are these two connected?"**.
 **6 · Workflow:** evidence **image attachments** (building/partner photos); a
 **watchlist** with per-CNPJ recheck intervals; a **change timeline** and a
 **diff of what changed** on each refresh; **CSV/JSON import & export** of
-campaigns; and **campaign merge**.
+campaigns; **campaign merge**; and a one-click **"open on Google Maps"**
+button on the company page (Location & contact) built from the registered
+address, so you don't have to copy/paste it by hand.
 
 **7 · Security / ops:** Leaflet, vis-network and the JetBrains Mono font are
 **vendored locally** (no CDN, works offline); **CSRF protection** on every POST;
@@ -96,10 +106,15 @@ against the official reference `12.ABC.345/01DE-35`.
 
 The score is the capped sum of evidence weights. Bands: `< 30` low · `30–59`
 medium · `60–79` high · `80+` critical. Pairwise signals (shared owner,
-address, e-mail, phone, root, etc.) and per-company heuristics (recent
-registration, NULA/INAPTA/SUSPENSA/BAIXADA status, nominal/high-new capital,
-MEI over the legal ceiling, risky CNAE, extreme partner age band, ownership
-flip, corporate name-twins, ring membership) each contribute weighted evidence.
+address, street, e-mail, phone, secondary CNAE, coordinated status change,
+root, etc.) and per-company heuristics (recent registration,
+NULA/INAPTA/SUSPENSA/BAIXADA status, special legal situation such as
+*liquidação* or *falência*, nominal/high-new capital, MEI over the legal
+ceiling, recent Simples/MEI exclusion, risky CNAE — principal or secondary —,
+extreme partner age band, ownership flip, corporate name-twins, ring
+membership) each contribute weighted evidence. A partner who shows up as the
+*administrator/director* (not just a passive quotista) of several companies
+scores as a stronger front-man signal than one who only holds equity.
 Confidence is reported separately from weight so weak-but-explanatory links
 (e.g. a shared accountant) don't masquerade as proof.
 
@@ -145,8 +160,10 @@ All state-changing requests require a CSRF token (form field `csrf_token` or
 
 - The opencnpj API may rate-limit or block datacenter IPs; the client uses a
   browser User-Agent and retries. Run it from your own machine for best results.
-- Map **tiles** (CartoDB) and **geocoding** (Nominatim) are online data sources,
-  like the company API itself — only the front-end libraries are vendored.
+- Map **tiles** ([OpenStreetMap](https://www.openstreetmap.org/copyright), free
+  and keyless — CSS-filtered to a dark theme, since no free dark raster source
+  exists) and **geocoding** (Nominatim) are online data sources, like the
+  company API itself — only the front-end libraries are vendored.
 - Alphanumeric CNPJs are accepted now so the platform is ready ahead of the
   July 2026 rollout; the public API may not return them until issuance begins.
 - This is an analysis aid. Every signal is a lead to verify, not a verdict.

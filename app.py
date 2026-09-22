@@ -10,6 +10,7 @@ import json
 import time
 import secrets
 import threading
+from urllib.parse import quote_plus
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    jsonify, abort, Response, session, send_file, g)
@@ -379,7 +380,24 @@ def cnpj_detail(cnpj):
                            attachments=db.list_attachments(cnpj),
                            watched=db.is_watched(cnpj),
                            history=db.cnpj_history(cnpj),
-                           diff=db.cnpj_latest_diff(cnpj))
+                           diff=db.cnpj_latest_diff(cnpj),
+                           gmaps_url=google_maps_url(row),
+                           cnaes=db.cnaes_for(cnpj))
+
+
+def google_maps_url(row):
+    """Build a Google Maps search link for a company's registered address, or
+    None if there isn't enough address data to make one worthwhile."""
+    street = " ".join(x for x in [row.get("tipo_logradouro"), row.get("logradouro")] if x)
+    parts = [
+        f"{street}, {row['numero']}" if street and row.get("numero") else street,
+        row.get("bairro"), row.get("municipio"), row.get("uf"), row.get("cep"),
+    ]
+    parts = [p.strip() for p in parts if p and p.strip()]
+    if not parts:
+        return None
+    query = quote_plus(", ".join(parts) + ", Brasil")
+    return f"https://www.google.com/maps/search/?api=1&query={query}"
 
 
 @app.route("/cnpj/<cnpj>/review", methods=["POST"])

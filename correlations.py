@@ -22,20 +22,20 @@ import enrich
 RISK_WEIGHTS = {
     "recent": 22, "very_recent": 13,
     "shared_address": 18, "address_farm": 9,
-    "street_num_cep": 16, "shared_cep": 4,
+    "street_num_cep": 16, "shared_cep": 4, "shared_street": 3,
     "shared_email": 16, "shared_email_domain": 9, "contact_hub": 7,
     "shared_phone": 13, "shared_phone_prefix": 6,
-    "shared_partner": 20, "partner_fuzzy": 10, "serial_partner": 16,
+    "shared_partner": 20, "partner_fuzzy": 10, "serial_partner": 16, "serial_admin": 23,
     "shared_accountant": 9,
-    "same_reg_day": 12, "regday_muni_cnae": 12,
-    "juridical_cnae_capital": 7,
+    "same_reg_day": 12, "regday_muni": 9, "regday_muni_cnae": 12,
+    "juridical_cnae_capital": 7, "shared_cnae_secondary": 3,
     "adjacent_base": 14, "same_root8": 12,
-    "geo_cluster": 8,
+    "geo_cluster": 8, "closure_batch": 13,
     "same_capital": 5,
     "status_nula": 30, "status_inapta": 22, "status_suspensa": 18,
-    "status_baixada": 12, "status_other": 10,
+    "status_baixada": 12, "status_other": 10, "special_situation": 17,
     "nominal_capital": 8, "high_new_capital": 12, "mei_over_limit": 10,
-    "risky_cnae": 8, "extreme_age": 12, "ownership_flip": 14,
+    "risky_cnae": 8, "extreme_age": 12, "ownership_flip": 14, "regime_exit": 8,
     "name_twin": 10, "ring_member": 6,
 }
 
@@ -47,18 +47,31 @@ PAIR_DIMS = {
     "address_full":   dict(w="shared_address",   conf=0.80, src="registry",      low=False, label="Same full address"),
     "street_num_cep": dict(w="street_num_cep",   conf=0.85, src="derived (addr)",low=False, label="Same street+number+CEP"),
     "cep":            dict(w="shared_cep",        conf=0.30, src="registry",      low=True,  label="Same CEP"),
+    "street_name":    dict(w="shared_street",    conf=0.20, src="derived (addr)",low=True,  label="Same street (any number)"),
     "email":          dict(w="shared_email",     conf=0.80, src="registry",      low=False, label="Same e-mail"),
     "email_domain":   dict(w="shared_email_domain", conf=0.60, src="derived",    low=False, label="Same e-mail domain"),
     "accountant":     dict(w="shared_accountant",conf=0.45, src="derived",       low=False, label="Same accounting contact"),
     "phone":          dict(w="shared_phone",     conf=0.75, src="registry",      low=False, label="Same phone"),
     "phone_prefix":   dict(w="shared_phone_prefix", conf=0.40, src="derived",    low=True,  label="Same DDD+phone prefix"),
+    "regday_muni":    dict(w="regday_muni",      conf=0.40, src="derived",       low=False, label="Same open-date + city"),
     "regday_muni_cnae": dict(w="regday_muni_cnae", conf=0.60, src="derived",     low=False, label="Same open-date + city + activity"),
     "juridical_cnae_capital": dict(w="juridical_cnae_capital", conf=0.30, src="derived", low=True, label="Same nature + activity + capital band"),
+    "cnae_secondary": dict(w="shared_cnae_secondary", conf=0.25, src="registry", low=True,  label="Shared secondary business activity"),
     "root8":          dict(w="same_root8",       conf=0.70, src="registry",      low=False, label="Same 8-char CNPJ root"),
     "capital":        dict(w="same_capital",     conf=0.20, src="registry",      low=True,  label="Identical declared capital"),
     "regday":         dict(w="same_reg_day",     conf=0.45, src="registry",      low=False, label="Same registration day"),
     "geo":            dict(w="geo_cluster",      conf=0.50, src="geocode",       low=False, label="Geographically co-located"),
+    "closure_batch":  dict(w="closure_batch",    conf=0.55, src="derived",       low=False, label="Coordinated status change (batch)"),
 }
+
+# partner qualification text (Portuguese, accent-stripped/upper-cased) that
+# implies actual control of the company, not just passive equity — a partner
+# who shows up as the controlling role across many companies is a stronger
+# front-man ("laranja") signal than one who is merely listed as a quotista.
+CONTROL_ROLES = (
+    "ADMINISTRADOR", "DIRETOR", "PRESIDENTE", "SOCIO-GERENTE", "SOCIO GERENTE",
+    "TITULAR", "RESPONSAVEL", "LIQUIDANTE", "SOCIO-ADMINISTRADOR", "GERENTE",
+)
 
 RISKY_CNAE_PREFIXES = {
     "6462": "Holdings of non-financial institutions",
@@ -98,6 +111,48 @@ def _months_old(d):
     return (t.year - d.year) * 12 + (t.month - d.month) - (1 if t.day < d.day else 0)
 
 
+def _raw(r):
+    """Full raw registry payload for a row (cached in the `raw_json` column),
+    for fields the flat table doesn't carry (situacao_especial, motivo, the
+    Simples/MEI opt-in/opt-out dates, secondary CNAEs, ...)."""
+    try:
+        return json.loads(r.get("raw_json") or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
+def _motivo_desc(raw):
+    """Human-readable status-change reason, or '' if there isn't one worth
+    surfacing ('SEM MOTIVO' / blank is the API's way of saying 'no reason')."""
+    m = raw.get("motivo_situacao_cadastral")
+    if isinstance(m, dict):
+        m = m.get("descricao") or ""
+    if not isinstance(m, str):
+        return ""
+    m = m.strip()
+    return "" if not m or m.upper() == "SEM MOTIVO" else m
+
+
+def _secondary_cnaes(raw):
+    """Secondary CNAE codes. The live API exposes these as a plain code list
+    under 'cnaes_secundarios' (no description) rather than as objects inside
+    'cnaes', which is usually empty — both shapes are read defensively."""
+    codes = set()
+    try:
+        for c in (raw.get("cnaes") or []):
+            if not c.get("is_principal"):
+                cc = enrich.cnae_clean(c.get("codigo") or c.get("cnae"))
+                if cc:
+                    codes.add(cc)
+    except (AttributeError, TypeError):
+        pass
+    for code in (raw.get("cnaes_secundarios") or []):
+        cc = enrich.cnae_clean(code)
+        if cc:
+            codes.add(cc)
+    return codes
+
+
 def _phones(r):
     out = []
     try:
@@ -126,8 +181,14 @@ def _partners(r):
         key = f"{cpf}::{up}" if cpf and cpf != "***000000**" else up
         out.append({"key": key, "label": name, "fp": enrich.name_fingerprint(name),
                     "faixa": (p.get("faixa_etaria") or "").strip(),
+                    "qualificacao": (p.get("qualificacao_socio") or "").strip(),
                     "entrada": _parse_date(p.get("data_entrada_sociedade") or p.get("data_entrada"))})
     return out
+
+
+def _is_control_role(qualificacao):
+    up = enrich.strip_accents_upper(qualificacao)
+    return any(role in up for role in CONTROL_ROLES)
 
 
 def _cnae_list(r):
@@ -135,13 +196,7 @@ def _cnae_list(r):
     pc = enrich.cnae_clean(r.get("cnae_principal"))
     if pc:
         codes.add(pc)
-    try:
-        for c in (json.loads(r.get("raw_json") or "{}").get("cnaes") or []):
-            cc = enrich.cnae_clean(c.get("codigo") or c.get("cnae"))
-            if cc:
-                codes.add(cc)
-    except (ValueError, TypeError):
-        pass
+    codes |= _secondary_cnaes(_raw(r))
     return codes
 
 
@@ -196,10 +251,16 @@ def _build_index(rows):
 
     for r in rows:
         c = r["cnpj"]
+        raw = _raw(r)
         ak = enrich.address_keys(r)
         add("address_full", ak["full"], c, _address_label(r))
         add("street_num_cep", ak["street_num_cep"], c, _address_label(r))
         add("cep", ak["cep"], c, ak["cep"])
+        muni = enrich.strip_accents_upper(r.get("municipio"))
+        uf = enrich.strip_accents_upper(r.get("uf"))
+        if ak["logradouro_norm"] and muni:
+            add("street_name", f"{ak['logradouro_norm']}|{muni}|{uf}", c,
+                f"{ak['logradouro_norm'].title()} ({r.get('municipio')})")
         em = (r.get("email") or "").strip().lower()
         if em:
             add("email", em, c, em)
@@ -222,11 +283,12 @@ def _build_index(rows):
         if cap is not None:
             add("capital", cap, c, f"R$ {cap}")
         d = _parse_date(r.get("data_inicio_atividade"))
-        muni = enrich.strip_accents_upper(r.get("municipio"))
-        cnaes = _cnae_list(r)
         cdiv = enrich.cnae_division(r.get("cnae_principal"))
         if d:
             add("regday", d.isoformat(), c, d.isoformat())
+            if muni:
+                add("regday_muni", f"{d.isoformat()}|{muni}", c,
+                    f"{d.isoformat()} · {r.get('municipio')}")
             if muni and cdiv:
                 add("regday_muni_cnae", f"{d.isoformat()}|{muni}|{cdiv}", c,
                     f"{d.isoformat()} · {muni} · CNAE {cdiv}")
@@ -235,10 +297,21 @@ def _build_index(rows):
         if nat and cdiv and band:
             add("juridical_cnae_capital", f"{nat}|{cdiv}|{band}", c,
                 f"{nat} · CNAE {cdiv} · {band}")
+        for sec in _secondary_cnaes(raw):
+            add("cnae_secondary", sec, c, sec)
         from cnpj_utils import root8
         rt = root8(c)
         if rt:
             add("root8", rt, c, rt)
+        # coordinated status change: two non-active companies closed/suspended
+        # on the same date, for the same official reason, in the same city —
+        # a common signature of a batch of shells being wound down together.
+        sl = enrich.strip_accents_upper(r.get("situacao_cadastral"))
+        dsit = r.get("data_situacao")
+        motivo = _motivo_desc(raw)
+        if sl and sl != "ATIVA" and dsit and motivo and muni:
+            add("closure_batch", f"{dsit}|{motivo}|{muni}", c,
+                f"{dsit} · {motivo} · {r.get('municipio')}")
 
     # partner_fp: fuzzy-cluster partner-name fingerprints so small spelling
     # differences (typos, doubled letters) collapse to one group.
@@ -354,6 +427,7 @@ def build_analysis(rows, global_partner_counts=None):
 
     for r in rows:
         c = r["cnpj"]
+        raw = _raw(r)
         months = _months_old(_parse_date(r.get("data_inicio_atividade")))
         if months is not None and months < 12:
             ev(c, "recent", W["recent"], 0.7, f"{months} months", [], "registry",
@@ -372,34 +446,66 @@ def build_analysis(rows, global_partner_counts=None):
             ev(c, "contact_hub", W["contact_hub"], 0.6, ec["value"],
                [x for x in ec["cnpjs"] if x != c], "derived", "E-mail shared by many companies")
 
-        # serial partner / laranja
-        hub, hub_label = 0, ""
+        # serial partner / laranja — a partner listed as administrator, director
+        # or other controlling role across many companies is a stronger
+        # front-man signal than one who only ever appears as a passive quotista.
+        hub, hub_label, hub_admin = 0, "", False
         for p in _partners(r):
             cnt = max(partner_camp.get(p["key"], 0), global_partner_counts.get(p["key"], 0))
             if cnt > hub:
-                hub, hub_label = cnt, p["label"]
+                hub, hub_label, hub_admin = cnt, p["label"], _is_control_role(p["qualificacao"])
+            elif cnt == hub and cnt > 0 and _is_control_role(p["qualificacao"]):
+                hub_admin = True
         if hub >= 3:
-            ev(c, "serial_partner", W["serial_partner"], 0.8, hub_label, [], "derived",
-               f"Partner owns {hub} companies (front-man pattern)")
+            if hub_admin:
+                ev(c, "serial_admin", W["serial_admin"], 0.85, hub_label, [], "derived",
+                   f"Partner is administrator/officer in {hub} companies (possible front-man)")
+            else:
+                ev(c, "serial_partner", W["serial_partner"], 0.8, hub_label, [], "derived",
+                   f"Partner owns {hub} companies (front-man pattern)")
 
         # adjacency / root8
         if adjacent.get(c):
             ev(c, "adjacent_base", W["adjacent_base"], 0.5, r["cnpj"][:8],
                sorted(adjacent[c]), "registry", "Adjacent CNPJ root number")
 
-        # status
+        # status — the official reason code (when the registry gives one) is
+        # folded into the evidence detail so the investigator doesn't have to
+        # go dig through the raw record to see *why* a company was flagged.
         sl = enrich.strip_accents_upper(r.get("situacao_cadastral"))
+        motivo = _motivo_desc(raw)
+        suffix = f" — reason: {motivo}" if motivo else ""
         if sl and sl != "ATIVA":
             if "NULA" in sl:
-                ev(c, "status_nula", W["status_nula"], 0.9, r.get("situacao_cadastral"), [], "registry", "Status: NULA (declared void)")
+                ev(c, "status_nula", W["status_nula"], 0.9, r.get("situacao_cadastral"), [], "registry", f"Status: NULA (declared void){suffix}")
             elif "INAPTA" in sl:
-                ev(c, "status_inapta", W["status_inapta"], 0.85, r.get("situacao_cadastral"), [], "registry", "Status: INAPTA (stopped filing)")
+                ev(c, "status_inapta", W["status_inapta"], 0.85, r.get("situacao_cadastral"), [], "registry", f"Status: INAPTA (stopped filing){suffix}")
             elif "SUSPENSA" in sl:
-                ev(c, "status_suspensa", W["status_suspensa"], 0.8, r.get("situacao_cadastral"), [], "registry", "Status: SUSPENSA")
+                ev(c, "status_suspensa", W["status_suspensa"], 0.8, r.get("situacao_cadastral"), [], "registry", f"Status: SUSPENSA{suffix}")
             elif "BAIXADA" in sl:
-                ev(c, "status_baixada", W["status_baixada"], 0.7, r.get("situacao_cadastral"), [], "registry", "Status: BAIXADA (closed)")
+                ev(c, "status_baixada", W["status_baixada"], 0.7, r.get("situacao_cadastral"), [], "registry", f"Status: BAIXADA (closed){suffix}")
             else:
-                ev(c, "status_other", W["status_other"], 0.6, r.get("situacao_cadastral"), [], "registry", f"Status: {r.get('situacao_cadastral')}")
+                ev(c, "status_other", W["status_other"], 0.6, r.get("situacao_cadastral"), [], "registry", f"Status: {r.get('situacao_cadastral')}{suffix}")
+
+        # special legal situation (e.g. EM LIQUIDAÇÃO, FALIDA, EM RECUPERAÇÃO
+        # JUDICIAL) — a distinct field from situacao_cadastral, so it can fire
+        # even on a company that otherwise still reads as ATIVA.
+        sesp = (raw.get("situacao_especial") or "").strip()
+        if sesp:
+            ev(c, "special_situation", W["special_situation"], 0.8, sesp, [], "registry",
+               f"Special legal situation: {sesp}")
+
+        # recently pushed out of a simplified tax regime — not proof of
+        # anything on its own, but worth a small nudge alongside other signals.
+        for excl_field, opt_field, rname in (
+            ("data_exclusao_simples", "opcao_simples", "Simples Nacional"),
+            ("data_exclusao_mei", "opcao_mei", "MEI"),
+        ):
+            excl_m = _months_old(_parse_date(raw.get(excl_field)))
+            opted_in = enrich.strip_accents_upper(r.get(opt_field)) in ("S", "SIM")
+            if excl_m is not None and excl_m < 24 and not opted_in:
+                ev(c, "regime_exit", W["regime_exit"], 0.5, excl_m, [], "registry",
+                   f"Excluded from {rname} {excl_m} month(s) ago")
 
         # capital heuristics
         cap = r.get("capital_social")
@@ -415,11 +521,20 @@ def build_analysis(rows, global_partner_counts=None):
         if enrich.strip_accents_upper(r.get("opcao_mei")) in ("SIM", "S", "TRUE", "1") and cap and cap > MEI_CAPITAL_CEILING:
             ev(c, "mei_over_limit", W["mei_over_limit"], 0.6, cap, [], "registry", "MEI capital above legal ceiling")
 
-        # risky CNAE
+        # risky CNAE — checked across the principal *and* secondary activities,
+        # since a shell is often registered under an innocuous principal code
+        # with the risky one tucked into the secondary list.
         pref = enrich.cnae_clean(r.get("cnae_principal"))[:4]
         if pref in RISKY_CNAE_PREFIXES:
             ev(c, "risky_cnae", W["risky_cnae"], 0.4, pref, [], "registry",
                f"High-risk activity: {RISKY_CNAE_PREFIXES[pref]}")
+        else:
+            for sec in _secondary_cnaes(raw):
+                sp = sec[:4]
+                if sp in RISKY_CNAE_PREFIXES:
+                    ev(c, "risky_cnae", W["risky_cnae"], 0.3, sp, [], "registry",
+                       f"High-risk secondary activity: {RISKY_CNAE_PREFIXES[sp]}")
+                    break
 
         # partner age + ownership flip
         plist = _partners(r)
@@ -496,7 +611,8 @@ def build_analysis(rows, global_partner_counts=None):
     nodes, edges, connected = [], [], set()
     graph_dims = ["partner", "partner_fp", "address_full", "street_num_cep", "email",
                   "email_domain", "phone", "phone_prefix", "regday_muni_cnae",
-                  "root8", "geo", "capital", "cep"]
+                  "root8", "geo", "capital", "cep", "cnae_secondary", "regday_muni",
+                  "street_name", "closure_batch"]
     aid = 0
     for dim in graph_dims:
         meta = PAIR_DIMS[dim]
@@ -573,9 +689,10 @@ def build_analysis(rows, global_partner_counts=None):
             "mapped": len(map_points),
         },
         "clusters": {k: cluster_sets[k] for k in (
-            "partner", "partner_fp", "address_full", "street_num_cep", "cep", "email",
-            "email_domain", "accountant", "phone", "phone_prefix", "regday",
-            "regday_muni_cnae", "juridical_cnae_capital", "root8", "geo", "capital")},
+            "partner", "partner_fp", "address_full", "street_num_cep", "cep", "street_name",
+            "email", "email_domain", "accountant", "phone", "phone_prefix", "regday",
+            "regday_muni", "regday_muni_cnae", "juridical_cnae_capital", "cnae_secondary",
+            "root8", "geo", "capital", "closure_batch")},
         "rings": rings,
         "graph": {"nodes": nodes, "edges": edges},
         "map_points": map_points,

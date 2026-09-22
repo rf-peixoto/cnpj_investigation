@@ -656,6 +656,16 @@ def add_attachment(cnpj, campaign_id, filename, stored_name, mime, size, caption
         return cur.lastrowid
 
 
+def cnaes_for(cnpj):
+    """All normalized CNAE codes (principal + secondary) for one company,
+    principal first. Secondary codes from the live API arrive without a
+    description (see api_client.normalize_payload)."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM cnaes WHERE cnpj = ? ORDER BY is_principal DESC, codigo ASC", (cnpj,)
+        ).fetchall()]
+
+
 def list_attachments(cnpj):
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(
